@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | DRAFT — v0.1, pending review |
+| **Status** | DRAFT — v0.5, review pass applied (see document history) |
 | **Date** | 2026-09-25 |
 | **Author** | Yamill Anz (@yamillanz) |
 | **Name** | `mcprelay` (decided 2026-09-25) |
@@ -21,7 +21,7 @@ Every team that puts an MCP server in front of an agent rewrites the same plumbi
 This project is a **transparent middleware** (a local-first proxy/gateway) that wraps any stdio MCP server and adds four layers around `tools/call`:
 
 1. **Proxy** — speaks MCP on both sides; the upstream server never knows the middleware exists.
-2. **Reliability** *(the differentiator)* — timeouts, retry with backoff, and a **dead-letter queue (DLQ) with replay**: failed tool calls are captured with full context, inspectable, and re-executable — the SQS/DLQ operational model applied to tool calls.
+2. **Reliability** *(the differentiator)* — timeouts, retry with backoff, and a **dead-letter queue (DLQ) with replay**: failed tool calls are captured with full context, inspectable, and re-executable — the SQS/DLQ operational model applied to tool calls. Replay re-executes for the side effect; its result lands in the audit trail, because the original caller's session is gone (see *What replay means* below).
 3. **Policy** — declarative YAML allow/deny per tool and per argument, with a `--dry-run` mode.
 4. **Observability** — structured logs and per-tool metrics (latency, error rate, payload size, caller), reportable from the CLI.
 
@@ -32,10 +32,14 @@ Infrastructure is **pluggable ("bring your own queue")**: the DLQ lives behind a
 > 1. Wrap a real MCP server: `npx mcprelay -- npx @modelcontextprotocol/server-filesystem .`
 > 2. An agent calls a tool; policy blocks one call (`dry-run` shows it first).
 > 3. Another call fails (upstream timeout) → retries with backoff → still failing → **lands in the DLQ** with arguments, error, attempts, correlation id.
-> 4. `mcprelay replay --dry-run` → inspect → `mcprelay replay <id>` → the call is re-executed and an audit entry links original ↔ replay.
+> 4. `mcprelay replay --dry-run` → inspect → `mcprelay replay <id>` → the call re-executes, the **side effect lands** (the file is written / the issue is created), and the audit entry captures the replay's own result — the original caller is long gone, so the audit trail is where the outcome lives.
 > 5. `mcprelay report` shows per-tool latency and error rates.
 
 This flow is the GIF in the README and the acceptance test of the whole product.
+
+### What replay means (the honest semantics)
+
+A replayed call's response cannot be delivered to the agent that made it — that session is over. Replay is **redrive for side effects**: the call re-executes upstream, its (redacted) result or error is captured into the audit entry linked to the original record (FR-R4), and that audit trail is the **only place a replay's outcome can ever be inspected**. Read-only tools are rarely worth replaying (their only value was the response); the optional per-tool `effects: read` hint makes `replay --dry-run` say so. The demo ends on the visible side effect for exactly this reason — the side effect is the payoff, not the audit link alone.
 
 ---
 
@@ -57,7 +61,7 @@ This flow is the GIF in the README and the acceptance test of the whole product.
 **The problem.** Tool calls are the point where an agent's reasoning becomes real side effects — file writes, API calls, transactions — and today that point is governed by nothing:
 
 - **No permission layer.** Any agent connected to an MCP server can call any tool with any arguments. Prompt injection turns into `rm -rf` (see the Invariant Labs GitHub heist and filesystem-server CVEs).
-- **No failure story.** A tool call that times out or errors is simply lost. There is no dead-letter queue, no inspection, no replay. Teams that know event-driven systems (SQS + DLQs) know exactly what is missing; the MCP ecosystem has not imported that discipline.
+- **No failure story.** A tool call that times out or errors is simply lost — the agent may see the error and muddle through, but afterwards there is nothing to inspect, no record of what was attempted with which arguments, and no way to re-run the side-effecting call that died at 3 a.m. No dead-letter queue, no inspection, no replay. Teams that know event-driven systems (SQS + DLQs) know exactly what is missing; the MCP ecosystem has not imported that discipline.
 - **No observability.** Which tool is slow? Which agent is erroring? What did the model actually call last Tuesday? Nobody logs per-tool-call metrics by default.
 - **Every team rewrites it.** Permissions, logs, retries, audit — re-implemented per project, usually as afterthoughts.
 
@@ -91,7 +95,7 @@ Platform/infra engineer deploying MCP servers for a team — HTTP transport, API
 
 - **UC1 — Guardrail:** "My agent should read files but never delete them." Policy allow/deny + argument constraints; `--dry-run` before enforcing.
 - **UC2 — Failure capture:** "A tool call failed during a long agent run. I don't want to lose it." Call is retried, then captured in the DLQ with full context.
-- **UC3 — Replay:** "The upstream dependency is healthy again. Re-run the failed calls." `replay --dry-run` → `replay` → audit trail of what was re-executed.
+- **UC3 — Replay:** "The upstream dependency is healthy again. Re-run the failed calls." `replay --dry-run` → `replay` → the side effect lands and the audit trail records what was re-executed with the replay's result captured — the agent session that made the call is gone (*What replay means*, §1).
 - **UC4 — Answer "what happened?":** Per-tool latency, error rate, caller attribution via `report` and structured logs.
 
 ---
@@ -208,18 +212,24 @@ interface Store {                          // call history, metrics, audit
 
 Config selects providers (see FR-C1). Adding an adapter MUST NOT require changes to core logic.
 
+**Known impedance (D5, M4 design.md):** the port's `list`/`get` are store semantics — AMQP has no query. The RabbitMQ adapter must define them (metadata mirror vs. peek-via-requeue with an atomic `resolve()` guard vs. durable-record + event publish), and whether v1 needs a full DLX topology at all (backoff runs in-process) or a durable direct queue suffices. ADR required.
+
 ### 6.3 The call pipeline (every `tools/call`)
 
 ```
 receive → identify caller → policy check (allow/deny/args)
         → forward with timeout
-        → on transient failure: retry w/ exponential backoff + jitter (bounded attempts)
+        → on transient failure: retry w/ exponential backoff + jitter (bounded attempts,
+              class-gated per FR-R2: timeouts auto-retry only for idempotent tools)
+        → on client cancellation (notifications/cancelled): abort in-flight attempt,
+              stop retrying, no DLQ — logged as decision `cancelled` (FR-R2)
         → on success: record CallEvent → return result
         → on exhaustion / non-retryable / timeout:
               enqueue FailureRecord (redacted args, error, attempts, correlation id)
               return standard MCP error to client
         → replay path: queue.list/get → policy re-evaluation (--dry-run first)
-                       → re-execute → resolve() → audit link original↔replay
+                        → re-execute → resolve() → audit link original↔replay
+                        → replay result (redacted) captured in the audit entry (FR-R4)
 ```
 
 ---
@@ -232,7 +242,7 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
 
 - **FR-P1** — The middleware SHALL wrap any stdio MCP server via a one-line invocation (`mcprelay -- <server command…>`) and present itself to the client as an ordinary MCP server.
 - **FR-P2** — Protocol fidelity: JSON-RPC messages SHALL pass through semantically unchanged (all fields preserved) except for deliberate interception (`tools/call` handling, error wrapping, injected `_meta` correlation keys). The upstream server SHALL NOT require modification, recompilation, or awareness of the middleware.
-  - *Acceptance:* the same client config works with and without the middleware; an unmodified public server (filesystem) completes a full session through the wrapper.
+  - *Acceptance:* the same client config works with and without the middleware; an unmodified public server (filesystem) completes a full session through the wrapper. Fidelity tests SHALL cover an explicit **passthrough matrix**: every client→server request/notification other than `tools/call` (e.g. `tools/list`, `resources/*`, `prompts/*`, `completion/*`, `logging/setLevel`, `notifications/initialized`), server→client requests (`sampling/createMessage`, `elicitation/create`, `roots/list`), `notifications/progress`, JSON-RPC **batch frames**, and `initialize` capability negotiation on both sides — `tools/call` is the only method with intercepted semantics.
 - **FR-P3** — The middleware SHALL intercept `tools/call` as the control point for policy, reliability, and logging, and SHALL record `initialize` and `tools/list` for session context.
 - **FR-P4** — Process hygiene: upstream stdout/stderr SHALL be handled so the client session behaves normally (server logs forwarded to stderr/log, never mixed into the protocol stream); upstream exit/crash SHALL surface as a clean transport error, and SHALL NOT corrupt DLQ/Store writes already made.
 - **FR-P5** — Correlation: every intercepted call SHALL carry a generated `correlation_id` propagated into logs, metrics, FailureRecords, and replay audit links; when the client supplies OTel `traceparent`/`tracestate`/`baggage` in `_meta` (2026-07-28 conventions), these SHALL be preserved and logged alongside.
@@ -241,27 +251,35 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
 ### FR-R — Reliability (core; the differentiator)
 
 - **FR-R1** — Timeout: each `tools/call` SHALL have a configurable timeout (global default + per-tool override). On expiry the call SHALL fail into the retry pipeline and ultimately return a standard MCP error to the client.
-- **FR-R2** — Retry: transient failures SHALL be retried with exponential backoff and jitter, bounded by configurable max attempts (global + per-tool). Non-retryable errors (e.g. policy rejections, schema violations) SHALL NOT be retried.
-- **FR-R3** — DLQ capture: when a call ultimately fails (attempts exhausted, timeout, or non-retryable), the middleware SHALL durably enqueue a `FailureRecord` **before** returning the error to the client, containing: tool name, redacted arguments, caller identity, error class/message, attempt count, timestamps, correlation id, and a content hash for idempotency.
+- **FR-R2** — Retry: transient failures SHALL be retried with exponential backoff and jitter, bounded by configurable max attempts (global + per-tool). Retry eligibility SHALL follow the failure-class taxonomy (D4; the class table is the M2 design.md deliverable):
+  - **Pre-execution transport failures** (the request provably never reached the tool — spawn/connect/send failures) SHALL be retryable unconditionally.
+  - **Post-execution failures** — upstream error responses and **timeouts** — may have side-effected already. A timed-out call SHALL be auto-retried only when the tool is marked `idempotent: true` (global + per-tool): a timeout does not mean "not executed".
+  - **`isError: true` results** are completed calls — the tool executed and reported failure. Never auto-retried; logged and counted (FR-O); DLQ capture is opt-in per tool (class `tool_error`, Appendix A).
+  - **`input_required` results** (`resultType: "input_required"`, spec 2026-07-28) are in-progress conversations, not failures: no retry, no DLQ; the follow-up `tools/call` with `inputResponses`/`requestState` passes through the same pipeline as one logical call.
+  - **Non-retryable errors** (e.g. policy rejections, schema violations) SHALL NOT be retried.
+  - **Client cancellation** (`notifications/cancelled` for the in-flight request) SHALL abort the in-flight upstream attempt, stop the retry pipeline, and SHALL NOT enter the DLQ — a cancelled call is not a failure. It is logged (decision `cancelled`, FR-O1) and counted in `report`.
+- **FR-R3** — DLQ capture: when a call ultimately fails (attempts exhausted, timeout, or non-retryable), the middleware SHALL durably enqueue a `FailureRecord` **before** returning the error to the client, containing: tool name, redacted arguments, caller identity, error class/message, attempt count, timestamps, correlation id, and a content hash for idempotency (computed over **raw** arguments — NFR-4).
   - *Acceptance:* killing the middleware immediately after an error response leaves the record persisted; `replay` lists it after restart.
-- **FR-R4** — Replay CLI: `mcprelay replay` SHALL support `list`, `inspect <id>`, `--dry-run` (re-evaluate policy/schema of the stored call **without** side effects), `run <id>` (re-execute), `run --all --filter …`, and SHALL write an audit entry linking original record ↔ replay attempt with its outcome.
-  - *Acceptance:* the §1 demo flow completes on a real server; a `--dry-run` performs zero upstream calls.
-- **FR-R5** — Idempotency guard: replay SHALL detect duplicate side-effect risk (idempotency key via `_meta.idempotencyKey` or an args field, plus content hash) and SHALL warn/require `--force` to re-execute a call whose key was already successfully executed within the dedup window.
-- **FR-R6** — `QueueProvider` port (§6.2): DLQ persistence SHALL be provider-selected (`queue.provider: sqlite | rabbitmq`). Both adapters SHALL provide durable enqueue, list/get with filters, resolve/purge semantics; RabbitMQ SHALL use a durable queue with dead-letter-exchange topology (`mcp.dlx`/`mcp.dlq`), mirroring SQS redrive semantics.
+- **FR-R4** — Replay CLI: `mcprelay replay` SHALL support `list`, `inspect <id>`, `--dry-run` (re-evaluate policy/schema of the stored call **without** side effects), `run <id>` (re-execute; `run --all --filter …` lands with M4, §12), and SHALL write an audit entry linking original record ↔ replay attempt **that captures the replay's own (redacted) result or error** — the only place a replay's outcome can ever be inspected, since the original caller's session is gone (*What replay means*, §1). The optional per-tool `effects: read` hint SHALL make `--dry-run` warn that a read-only tool is rarely worth replaying.
+  - *Acceptance:* the §1 demo flow completes on a real server and ends on the visible side effect; a `--dry-run` performs zero upstream calls; the replayed call's result is visible in its audit entry.
+- **FR-R5** — Idempotency guard: replay SHALL detect duplicate side-effect risk (idempotency key via `_meta.idempotencyKey` — our own convention until the spec's ETags/caching work lands, §5.1 — or an args field, plus content hash) and SHALL warn/require `--force` to re-execute a call whose key was already successfully executed within the configurable dedup window.
+- **FR-R6** — `QueueProvider` port (§6.2): DLQ persistence SHALL be provider-selected (`queue.provider: sqlite | rabbitmq`). Both adapters SHALL provide durable enqueue, list/get with filters, resolve/purge semantics, and an atomic `resolve()` so concurrent replay invocations cannot double-execute a record. The RabbitMQ topology (DLX `mcp.dlx`/`mcp.dlq` vs. direct durable queue) and its `list`/`get` implementation are the M4 design.md deliverable (D5); the goal is SQS-redrive-equivalent behavior.
 
 ### FR-O — Observability
 
-- **FR-O1** — Every intercepted call SHALL emit one structured JSON log line: timestamp, correlation id (plus OTel trace context when present, FR-P5), caller, server, tool, decision (allowed/denied/failed), latency_ms, payload sizes, attempt count, error (if any). Secrets SHALL be redacted per FR-N4.
+- **FR-O1** — Every intercepted call SHALL emit one structured JSON log line: timestamp, correlation id (plus OTel trace context when present, FR-P5), caller, server, tool, decision (allowed/denied/failed/cancelled), latency_ms, payload sizes, attempt count, error (if any). Secrets SHALL be redacted per NFR-4.
 - **FR-O2** — Per-tool metrics SHALL be persisted via the `Store` port: call count, error count/rate, latency p50/p95, payload size — attributable per caller and per tool.
-- **FR-O3** — `mcprelay report` SHALL render those metrics for a time range in a human-readable table and in `--json` (CI-friendly). Denied/failed/replayed counts SHALL be included.
+- **FR-O3** — `mcprelay report` SHALL render those metrics for a time range in a human-readable table and in `--json` (CI-friendly). Denied/failed/cancelled/replayed counts SHALL be included.
 - **FR-O4** *(stretch, M5)* — Optional Prometheus exposition endpoint (`/metrics`, OpenMetrics format) for users who scrape local services.
 
 ### FR-Y — Policy engine
 
-- **FR-Y1** — Policies SHALL be declarative YAML: allow/deny by tool name (glob patterns), by caller identity (when known), with a configurable default action. Most specific match wins; explicit ordering rules documented.
+- **FR-Y1** — Policies SHALL be declarative YAML: allow/deny by tool name (glob patterns), by caller identity (when known), with a configurable default action. Most specific match wins; ordering rules and the deterministic tie-break documented (M3 design.md — no undefined ties).
 - **FR-Y2** — Argument rules SHALL constrain call arguments (v1 matcher set: `equals`, `in`, `prefix`, `regex`, `max_length`, numeric bounds) — e.g. `path` must stay under `/projects`, `url` must match an allowlist.
 - **FR-Y3** — `--dry-run` (and `mcprelay policy test`) SHALL evaluate stored/ hypothetical calls against the current policy and print the decisions that *would* be enforced, without enforcement.
 - **FR-Y4** — Denied calls SHALL return a standard MCP error to the client and a Store audit entry; they SHALL NOT be forwarded upstream and SHALL NOT enter the DLQ (a denial is not a failure); the `report` SHALL count them.
+- **FR-Y5** — `tools/list` SHALL pass through unfiltered (v1): the agent sees the full tool inventory; denial happens at call time and is counted (FR-Y4). Hiding denied tools would be an invisible behavior change; revisit post-v1 behind an explicit opt-in. The README answers this explicitly — it will be asked.
+- **FR-Y6** — Policy-engine hygiene: safe YAML parsing, ReDoS-bounded regex matching (input-length + execution budget), and the deterministic precedence of FR-Y1.
 
 ### FR-C — Configuration & CLI
 
@@ -283,12 +301,13 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
 |---|---|---|
 | NFR-1 | **OSS-only dependencies** (P1) | Every runtime dep permissive (MIT/Apache-2.0/BSD/ISC); `npm ls` audit in CI; no feature requires network egress to a vendor service. |
 | NFR-2 | **Zero intrusion** (P3) | Unmodified upstream server passes an end-to-end session (FR-P2 test). |
-| NFR-3 | **Latency overhead** | Middleware overhead (policy + log + queue bookkeeping, excluding upstream) ≤ 5 ms p95 on the demo machine; failure-path work (backoff) never blocks the success path. |
-| NFR-4 | **Secrets redaction** | Configurable key patterns (`api_key`, `token`, `password`, `authorization`, `secret`, …) redacted in logs, FailureRecords, reports; redaction applied before persistence. |
+| NFR-3 | **Latency overhead** | Middleware overhead (policy + log + queue bookkeeping, excluding upstream) ≤ 5 ms p95 on the demo machine, measured by the committed benchmark script (`bench/`: N calls direct vs. through the middleware, same machine, p95 of the middleware-only delta); failure-path work (backoff) never blocks the success path. |
+| NFR-4 | **Secrets redaction** | Configurable key patterns (`api_key`, `token`, `password`, `authorization`, `secret`, …) redacted in logs, FailureRecords, reports — and in error messages and replay/audit **result payloads**, which echo arguments back; applied before persistence. `arguments_hash` is computed over raw (unredacted) arguments for dedup stability; redacted values are what get persisted. |
 | NFR-5 | **Durability** | DLQ enqueue completes before the client receives the error (FR-R3); middleware crash loses at most in-flight upstream calls, never already-captured records. |
 | NFR-6 | **Portability** | Linux + macOS first-class; Windows best-effort (stdio spawn semantics documented); Node ≥ 20. |
 | NFR-7 | **DX** | One-line start; complete `--help`; config errors actionable; README quickstart works verbatim. |
 | NFR-8 | **Testability** | Policy + pipeline + sqlite adapter hermetic in CI; RabbitMQ adapter tested against a real broker via Docker Compose (CI job or documented local step). |
+| NFR-9 | **Local concurrency & growth** | SQLite files shared safely across the middleware process(es) and the `replay` CLI (WAL + busy_timeout; several wrapped servers may share `./.mcprelay/`); Store growth bounded by configurable retention (default 30 days of CallEvents; cleanup documented). |
 
 ---
 
@@ -296,7 +315,7 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
 
 ### Gating (milestone exit criteria)
 
-- §1 demo flow (call → deny → fail → DLQ → replay → report) passes on a real server, recorded as the README GIF.
+- §1 demo flow (call → deny → fail → DLQ → replay → report) passes on a real server — ending on the visible replayed side effect — and is recorded as the README GIF.
 - `docker compose up` demo (middleware + RabbitMQ + example server) works from M4 on.
 - CI green on every PR: tests, typecheck, lint, config-validation smoke.
 - Package published to npm and runnable via `npx mcprelay`.
@@ -309,6 +328,9 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
 - README: one-liner, 60s GIF, architecture diagram, design decisions (3–4 ADRs with rejected alternatives).
 - Launch post: *"Why your agent's tool calls need a dead-letter queue"* (with the DLQ GIF).
 - Listings: PRs to `awesome-mcp-servers` lists; post in r/MCP + MCP Discord showing the problem, not the repo.
+- README quickstart leads with the **client-config snippet** (Claude Desktop / OpenCode / Cursor wrapping one server) — the persona's real install path; the bare CLI demo is secondary.
+- README answers the two questions it will definitely get: `tools/list` visibility (FR-Y5) and replay semantics (*What replay means*, §1).
+- The README competitive table carries per-row repo links (falsifiable scan); star counts re-verified at publish time.
 
 ### Aspirational (tracked, not gating)
 
@@ -338,10 +360,10 @@ Stars, npm downloads, community adapters (Redis/NATS), external contributors. Ni
 |---|---|---|
 | **Crowded market** (10+ projects, 2025–26 wave) | Differentiation erodes | Reliability-first discipline (§5): DLQ+replay stays the headline; competitive table lives in the README; do not rebuild `mcp-audit` features. |
 | **Scope creep via adapters** | Missed deadlines | Hard cap: 2 ports, 2 queue adapters, 1 store adapter in v1. New adapters = post-v1. |
-| **Maintainer bandwidth** (solo, part-time) | Half-finished repo is worse than none | 3-week cut rule: if M1 is not public after 3 weeks, cut scope to *proxy + logs + DLQ* and ship that. M2 public beats M1–M6 half-done |
+| **Maintainer bandwidth** (solo, part-time) | Half-finished repo is worse than none | 3-week cut rule: if the repo is not public after 3 weeks of part-time work, stop polishing and cut scope to *proxy + logs + DLQ + replay (SQLite)* — that is M2 — and ship it. A public M2 (per §9) beats M1–M6 half-done |
 | **MCP spec/SDK churn** (spec 2026-07-28, SDK v2 line; roadmap: Agent Identity/DPoP, ETags for tool calls, standardized errors) | Protocol fidelity breaks; future spec features duplicate parts of the middleware | Pin SDK version; fidelity tests (FR-P2); **track-and-adopt policy** (§5.1): when spec features land (identity, ETags, error taxonomy), our policy/idempotency/error layers adopt them instead of keeping custom equivalents. The execution-governance gap (DLQ/replay/audit) is *not* on the spec roadmap |
-| **Replay side effects** | Duplicate writes in upstream systems | Dry-run by default UX, idempotency guard (FR-R5), audit links, explicit warnings. |
-| **Name squatting** (`mcprelay` verified free 2026-09-25; the space is crowded — `mcp-sentinel`, `mcp-gateway`, `toolgate` are all taken) | Lose the name / discoverability | Reserve the npm package and `github.com/yamillanz/mcprelay` at first publish (M2); npm scope fallback (`@yamillanz/mcprelay`) if the bare name is claimed first |
+| **Replay & retry side effects** | Duplicate writes in upstream systems | Dry-run by default UX, idempotency guard (FR-R5), timeout-retry gated on per-tool `idempotent` (FR-R2), result-capturing audit links (FR-R4), explicit warnings. |
+| **Name squatting** (`mcprelay` verified free 2026-09-25; the space is crowded — `mcp-sentinel`, `mcp-gateway`, `toolgate` are all taken; names are claimed weekly) | Lose the name / discoverability | **Reserve immediately, not at publish:** npm placeholder publish now (real publish at M2, §9); GitHub repo (`github.com/yamillanz/mcprelay`) already exists — pushed and public by M2, or earlier if the 3-week rule triggers; npm scope fallback (`@yamillanz/mcprelay`) if the bare name is claimed first |
 
 ---
 
@@ -352,14 +374,14 @@ Each milestone is an OpenSpec change (`openspec/changes/<id>/`), is independentl
 | # | Milestone | Deliverable | Exit criteria | Est. |
 |---|---|---|---|---|
 | **M1** | Transparent proxy + structured logs | Wrap any stdio server; JSON log per call; correlation ids; process hygiene | Unmodified public server works end-to-end through the wrapper (FR-P2 test); logs readable | 2–3 n |
-| **M2** | **Reliability core** *(first public release)* | `QueueProvider` port + SQLite adapter; timeout, retry/backoff; DLQ capture; `replay` (list/inspect/dry-run/run); audit links | §1 demo steps 1, 3, 4 on a real server; durability test (NFR-5); repo public with honest README | 4–5 n |
+| **M2** | **Reliability core** *(first public release)* | `QueueProvider` port + SQLite adapter; timeout, retry/backoff (failure-class semantics, D4); DLQ capture; `replay` (list/inspect/dry-run/`run <id>` — `run --all --filter` lands at M4) with result-capturing audit links | §1 demo steps 1, 3, 4 on a real server, ending on the visible side effect; durability test (NFR-5); cancellation & `isError` fidelity tests; repo public with honest README | 3–4 n |
 | **M2b** | Streamable HTTP transport | Same pipeline toward remote/HTTP servers | Filesystem + one remote server covered by the same policy/DLQ config | 2–3 n |
 | **M3** | Policy engine | YAML allow/deny, argument matchers, `--dry-run`, `policy test` | Demo step 2 (block + dry-run) works; policy suite green | 3–4 n |
-| **M4** | **RabbitMQ adapter + compose demo** | `RabbitMqQueueProvider` (DLX topology); `docker compose up` = middleware + RabbitMQ + example server | Same DLQ/replay flow with `queue.provider: rabbitmq`; compose demo reproducible | 2–3 n |
+| **M4** | **RabbitMQ adapter + batch replay + compose demo** | `RabbitMqQueueProvider` (`list`/`get` semantics + topology per D5); batch replay (`run --all --filter`); `docker compose up` = middleware + RabbitMQ + example server | Same DLQ/replay flow with `queue.provider: rabbitmq`; batch redrive works; concurrent replay safe (atomic `resolve()`); compose demo reproducible | 3–4 n |
 | **M5** | Observability | Per-tool metrics in Store; `report` (table + `--json`); stretch: `/metrics` | Demo step 5 with real numbers; metrics match logs | 3–4 n |
 | **M6** | Auth + publication | API keys → identities (JWT stretch); README w/ GIF + ADRs; examples; npm publish; awesome-list PR | All §9 gating metrics green | 3–4 n |
 
-**Total:** ≈ 4–5 weeks part-time (M2b added to the original 3–4 week sketch). Reorder rationale: the README hook (fail → DLQ → replay) ships at **M2**, not later — the differentiator is public as early as possible.
+**Total:** ≈ 4–5 weeks part-time (M2b added to the original 3–4 week sketch; batch replay moved M2 → M4 so M2 ships exactly the §1 demo). Reorder rationale: the README hook (fail → DLQ → replay) ships at **M2**, not later — the differentiator is public as early as possible.
 
 ---
 
@@ -387,7 +409,8 @@ Each milestone is an OpenSpec change (`openspec/changes/<id>/`), is independentl
 |---|---|---|---|---|
 | D2 | Postgres `Store` adapter timing | v1.1 vs. stretch in M6 | v1.1 — keeps v1 cap (P4) honest | M6 |
 | D3 | Argument-rule engine depth | Simple matchers (FR-Y2) vs. JSON-Schema subset | Simple matchers for v1; revisit if users demand schema | M3 kickoff |
-| D4 | Retryable-error taxonomy | Client-supplied hints vs. heuristic classification | Heuristic (timeouts, 5xx-class, transport) + per-tool override; document table | M2 design.md |
+| D4 | Retryable-error taxonomy | Client-supplied hints vs. heuristic classification | Heuristic class table covering: pre-execution transport vs. post-execution (upstream error / timeout), `isError: true` (no retry; opt-in capture), timeout⇄`idempotent` gating (FR-R2), per-tool override — the table itself is the M2 design.md deliverable | M2 design.md |
+| D5 | RabbitMQ adapter `list`/`get` semantics & topology | Metadata mirror / peek-via-requeue + atomic `resolve()` / durable record + event publish; DLX vs. direct durable queue | The replay path is the only list/filter consumer — favor the simplest design that keeps replay correct and concurrent-safe; in-process backoff may make a plain durable queue sufficient | M4 design.md |
 
 ---
 
@@ -399,9 +422,11 @@ correlation_id: uuid
 captured_at: iso8601
 caller: { type: stdio|http, identity: string }
 server: { name: string, command: string }
-tool: { name: string, arguments_hash: sha256, arguments: {} }   # arguments redacted
-failure: { class: timeout|upstream_error|transport|non_retryable, message: string, attempts: int }
+tool: { name: string, arguments_hash: sha256, arguments: {} }   # hash over raw args (NFR-4); persisted arguments redacted
+failure: { class: timeout|upstream_error|transport|non_retryable|tool_error, message: string, attempts: int }
+# tool_error = opt-in capture of isError:true results (FR-R2); cancelled calls are not failures and never enter the DLQ
 replay: { status: pending|replayed|discarded, attempts: [], last_outcome: null }
+# last_outcome = the replay's own (redacted) result or error — the only place a replay's outcome lives (FR-R4)
 ```
 
 ## Appendix B — Example config
@@ -420,15 +445,18 @@ store:
 reliability:
   timeout_ms: 30000
   retry: { max_attempts: 3, backoff: exponential, base_ms: 250, jitter: true }
+  replay: { dedup_window: 24h }        # FR-R5 idempotency window
   per_tool:
     slow_tool: { timeout_ms: 120000, retry: { max_attempts: 1 } }
+    create_issue: { idempotent: true }  # FR-R2: timed-out calls auto-retry only for idempotent tools
+    flaky_search: { effects: read }     # FR-R4: replay --dry-run warns on read-only tools
 
 policy:
   default: allow                      # allow | deny
   rules:
     - { tool: "fs/delete_*", action: deny }
     - { tool: "fs/read_file", args: { path: { prefix: "/projects" } }, action: allow }
-    - { tool: "http/fetch",   args: { url:   { in: ["https://api.github.com/*"] } }, action: allow }
+    - { tool: "http/fetch",   args: { url:   { prefix: "https://api.github.com/" } }, action: allow }
 
 redaction:
   patterns: [api_key, token, password, authorization, secret, credential]
@@ -436,4 +464,4 @@ redaction:
 
 ---
 
-*Document history: v0.1 (2026-09-25) — initial draft; competitive scan of the 2026-09 ecosystem; positioning decisions (reliability-first, local-first, stdio-first, pluggable OSS providers). v0.2 (2026-09-25) — added §5.1 protocol-security boundary (MCP spec 2026-07-28 auth model + roadmap alignment), FR-P6 protocol revisions, FR-A3 no-token-passthrough, OTel `_meta` correlation, spec-churn track-and-adopt policy. v0.3 (2026-09-25) — product-only framing throughout (this document describes the solution, nothing about its origin context). v0.4 (2026-09-25) — D1 resolved: the project name is `mcprelay`.*
+*Document history: v0.1 (2026-09-25) — initial draft; competitive scan of the 2026-09 ecosystem; positioning decisions (reliability-first, local-first, stdio-first, pluggable OSS providers). v0.2 (2026-09-25) — added §5.1 protocol-security boundary (MCP spec 2026-07-28 auth model + roadmap alignment), FR-P6 protocol revisions, FR-A3 no-token-passthrough, OTel `_meta` correlation, spec-churn track-and-adopt policy. v0.3 (2026-09-25) — product-only framing throughout (this document describes the solution, nothing about its origin context). v0.4 (2026-09-25) — D1 resolved: the project name is `mcprelay`. v0.5 (2026-09-25) — review pass (product + protocol + architecture): replay semantics made explicit — result → audit trail ("What replay means", §1), demo ends on the side effect, FR-R4 result capture; FR-R2 failure-class semantics (cancellation, `isError: true`, `input_required`, timeout⇄`idempotent`); FR-P2 passthrough matrix; FR-Y5/Y6; FR-R6 atomic resolve; D4 widened, D5 added (RabbitMQ `list`/`get` impedance); NFR-3 method, NFR-4 hash-raw/persist-redacted, NFR-9; batch replay moved M2 → M4; name reservation immediate; §11 cut rule harmonized with §9; Appendix A/B fixes.*
