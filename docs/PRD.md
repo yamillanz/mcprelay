@@ -2,13 +2,13 @@
 
 | | |
 |---|---|
-| **Status** | DRAFT — v0.5, review pass applied (see document history) |
+| **Status** | DRAFT — v0.6 (see document history) |
 | **Date** | 2026-09-25 |
 | **Author** | Yamill Anz (@yamillanz) |
 | **Name** | `mcprelay` (decided 2026-09-25) |
 | **License** | MIT |
 | **Stack** | TypeScript / Node.js ≥ 20, official MCP TypeScript SDK |
-| **Method** | Spec-driven (OpenSpec). Each milestone in §12 becomes one `openspec/changes/<milestone>/` (proposal → design → delta specs → tasks). |
+| **Method** | Spec-driven (OpenSpec). Each milestone in §12 becomes one `openspec/changes/<id>/` (proposal → design → delta specs → tasks; the infra-only M0 carries proposal + tasks, no deltas). |
 
 > One-liner: **Middleware that sits between MCP clients and MCP servers and gives tool calls what production systems take for granted — policies, observability, and a dead-letter queue with replay.**
 
@@ -176,13 +176,13 @@ The protocol is also moving **away** from delivery guarantees: the 2026-07-28 re
                                │           │                               ├─ sqlite   (default)
                                │           │                               └─ postgres (later)
                                │           └─ allow/deny per tool + argument rules
-                               └─ API keys → JWT (M6, mainly for HTTP)
+                                └─ API keys → JWT (M9, mainly for HTTP)
 
    CLI: mcprelay run | replay | report | policy | validate
 ```
 
 - **v1 scope is 1:1**: one middleware process wraps one upstream server command (the `gateward`/`mcp-proxy` UX). Multi-server aggregation/routing (the `meta-mcp`/Microsoft territory) is explicitly out of scope (§10).
-- Streamable HTTP transport (1:1 toward a remote server) lands in **M2b** (§12); stdio is the v1 core.
+- Streamable HTTP transport (1:1 toward a remote server) lands in **M6** (§12); stdio is the v1 core.
 
 ### 6.2 Ports & adapters ("bring your own queue")
 
@@ -212,7 +212,7 @@ interface Store {                          // call history, metrics, audit
 
 Config selects providers (see FR-C1). Adding an adapter MUST NOT require changes to core logic.
 
-**Known impedance (D5, M4 design.md):** the port's `list`/`get` are store semantics — AMQP has no query. The RabbitMQ adapter must define them (metadata mirror vs. peek-via-requeue with an atomic `resolve()` guard vs. durable-record + event publish), and whether v1 needs a full DLX topology at all (backoff runs in-process) or a durable direct queue suffices. ADR required.
+**Known impedance (D5, M7 design.md):** the port's `list`/`get` are store semantics — AMQP has no query. The RabbitMQ adapter must define them (metadata mirror vs. peek-via-requeue with an atomic `resolve()` guard vs. durable-record + event publish), and whether v1 needs a full DLX topology at all (backoff runs in-process) or a durable direct queue suffices. ADR required.
 
 ### 6.3 The call pipeline (every `tools/call`)
 
@@ -260,21 +260,21 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
   - **Client cancellation** (`notifications/cancelled` for the in-flight request) SHALL abort the in-flight upstream attempt, stop the retry pipeline, and SHALL NOT enter the DLQ — a cancelled call is not a failure. It is logged (decision `cancelled`, FR-O1) and counted in `report`.
 - **FR-R3** — DLQ capture: when a call ultimately fails (attempts exhausted, timeout, or non-retryable), the middleware SHALL durably enqueue a `FailureRecord` **before** returning the error to the client, containing: tool name, redacted arguments, caller identity, error class/message, attempt count, timestamps, correlation id, and a content hash for idempotency (computed over **raw** arguments — NFR-4).
   - *Acceptance:* killing the middleware immediately after an error response leaves the record persisted; `replay` lists it after restart.
-- **FR-R4** — Replay CLI: `mcprelay replay` SHALL support `list`, `inspect <id>`, `--dry-run` (re-evaluate policy/schema of the stored call **without** side effects), `run <id>` (re-execute; `run --all --filter …` lands with M4, §12), and SHALL write an audit entry linking original record ↔ replay attempt **that captures the replay's own (redacted) result or error** — the only place a replay's outcome can ever be inspected, since the original caller's session is gone (*What replay means*, §1). The optional per-tool `effects: read` hint SHALL make `--dry-run` warn that a read-only tool is rarely worth replaying.
+- **FR-R4** — Replay CLI: `mcprelay replay` SHALL support `list`, `inspect <id>`, `--dry-run` (re-evaluate policy/schema of the stored call **without** side effects), `run <id>` (re-execute; `run --all --filter …` lands with M7, §12), and SHALL write an audit entry linking original record ↔ replay attempt **that captures the replay's own (redacted) result or error** — the only place a replay's outcome can ever be inspected, since the original caller's session is gone (*What replay means*, §1). The optional per-tool `effects: read` hint SHALL make `--dry-run` warn that a read-only tool is rarely worth replaying.
   - *Acceptance:* the §1 demo flow completes on a real server and ends on the visible side effect; a `--dry-run` performs zero upstream calls; the replayed call's result is visible in its audit entry.
 - **FR-R5** — Idempotency guard: replay SHALL detect duplicate side-effect risk (idempotency key via `_meta.idempotencyKey` — our own convention until the spec's ETags/caching work lands, §5.1 — or an args field, plus content hash) and SHALL warn/require `--force` to re-execute a call whose key was already successfully executed within the configurable dedup window.
-- **FR-R6** — `QueueProvider` port (§6.2): DLQ persistence SHALL be provider-selected (`queue.provider: sqlite | rabbitmq`). Both adapters SHALL provide durable enqueue, list/get with filters, resolve/purge semantics, and an atomic `resolve()` so concurrent replay invocations cannot double-execute a record. The RabbitMQ topology (DLX `mcp.dlx`/`mcp.dlq` vs. direct durable queue) and its `list`/`get` implementation are the M4 design.md deliverable (D5); the goal is SQS-redrive-equivalent behavior.
+- **FR-R6** — `QueueProvider` port (§6.2): DLQ persistence SHALL be provider-selected (`queue.provider: sqlite | rabbitmq`). Both adapters SHALL provide durable enqueue, list/get with filters, resolve/purge semantics, and an atomic `resolve()` so concurrent replay invocations cannot double-execute a record. The RabbitMQ topology (DLX `mcp.dlx`/`mcp.dlq` vs. direct durable queue) and its `list`/`get` implementation are the M7 design.md deliverable (D5); the goal is SQS-redrive-equivalent behavior.
 
 ### FR-O — Observability
 
 - **FR-O1** — Every intercepted call SHALL emit one structured JSON log line: timestamp, correlation id (plus OTel trace context when present, FR-P5), caller, server, tool, decision (allowed/denied/failed/cancelled), latency_ms, payload sizes, attempt count, error (if any). Secrets SHALL be redacted per NFR-4.
 - **FR-O2** — Per-tool metrics SHALL be persisted via the `Store` port: call count, error count/rate, latency p50/p95, payload size — attributable per caller and per tool.
 - **FR-O3** — `mcprelay report` SHALL render those metrics for a time range in a human-readable table and in `--json` (CI-friendly). Denied/failed/cancelled/replayed counts SHALL be included.
-- **FR-O4** *(stretch, M5)* — Optional Prometheus exposition endpoint (`/metrics`, OpenMetrics format) for users who scrape local services.
+- **FR-O4** *(stretch — its own change after M8)* — Optional Prometheus exposition endpoint (`/metrics`, OpenMetrics format) for users who scrape local services.
 
 ### FR-Y — Policy engine
 
-- **FR-Y1** — Policies SHALL be declarative YAML: allow/deny by tool name (glob patterns), by caller identity (when known), with a configurable default action. Most specific match wins; ordering rules and the deterministic tie-break documented (M3 design.md — no undefined ties).
+- **FR-Y1** — Policies SHALL be declarative YAML: allow/deny by tool name (glob patterns), by caller identity (when known), with a configurable default action. Most specific match wins; ordering rules and the deterministic tie-break documented (M5 design.md — no undefined ties).
 - **FR-Y2** — Argument rules SHALL constrain call arguments (v1 matcher set: `equals`, `in`, `prefix`, `regex`, `max_length`, numeric bounds) — e.g. `path` must stay under `/projects`, `url` must match an allowlist.
 - **FR-Y3** — `--dry-run` (and `mcprelay policy test`) SHALL evaluate stored/ hypothetical calls against the current policy and print the decisions that *would* be enforced, without enforcement.
 - **FR-Y4** — Denied calls SHALL return a standard MCP error to the client and a Store audit entry; they SHALL NOT be forwarded upstream and SHALL NOT enter the DLQ (a denial is not a failure); the `report` SHALL count them.
@@ -287,7 +287,7 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
 - **FR-C2** — Zero-config UX: running with no config file SHALL work with safe defaults (SQLite providers, deny-nothing policy with warning, retries on, redaction on).
 - **FR-C3** — Command surface: `run`, `replay`, `report`, `policy`, `validate`, `version` — each with `--help`; exit codes SHALL be meaningful (0 ok, non-zero on validation failure / replay failure / denied-only runs per documented codes) for CI use.
 
-### FR-A — Auth (deferred to M6; matters mainly for HTTP)
+### FR-A — Auth (deferred to M9; matters mainly for HTTP)
 
 - **FR-A1** — The middleware SHALL support static API keys mapped to caller identities that feed policy decisions (header-based for the HTTP transport; profile-named identities for stdio).
 - **FR-A2** *(stretch)* — JWT validation (OAuth2 resource-server style: issuer/JWKS, audience per RFC 8707) and mTLS as a further stretch. Where the MCP auth spec applies (HTTP transports), the middleware SHALL act as an OAuth 2.1 resource server per that spec rather than inventing a custom scheme.
@@ -316,7 +316,7 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
 ### Gating (milestone exit criteria)
 
 - §1 demo flow (call → deny → fail → DLQ → replay → report) passes on a real server — ending on the visible replayed side effect — and is recorded as the README GIF.
-- `docker compose up` demo (middleware + RabbitMQ + example server) works from M4 on.
+- `docker compose up` demo (middleware + RabbitMQ + example server) works from M7 on.
 - CI green on every PR: tests, typecheck, lint, config-validation smoke.
 - Package published to npm and runnable via `npx mcprelay`.
 - ≥ 3 documented examples with public MCP servers in `/examples`.
@@ -324,7 +324,7 @@ Requirements use RFC-2119 keywords. Each maps to one or more OpenSpec delta spec
 
 ### Community & visibility (non-gating)
 
-- Repo public **from M2** with real commit history (developed in the open, not a finished-dump).
+- Repo public **from M2** with real commit history (developed in the open, not a finished-dump); first **usable** release — real npm publish + working `npx mcprelay` README hook — at **M4**.
 - README: one-liner, 60s GIF, architecture diagram, design decisions (3–4 ADRs with rejected alternatives).
 - Launch post: *"Why your agent's tool calls need a dead-letter queue"* (with the DLQ GIF).
 - Listings: PRs to `awesome-mcp-servers` lists; post in r/MCP + MCP Discord showing the problem, not the repo.
@@ -350,7 +350,7 @@ Stars, npm downloads, community adapters (Redis/NATS), external contributors. Ni
 | Prompt-injection / content scanning | Security-suite scope | `gateward`, `mcp-gate` |
 | Schema-drift scanning of tool definitions | Different problem | `mcp-sentinel` (schema-drift variant) |
 | Postgres store, Redis/NATS/ElasticMQ queue adapters | Deferred adapters (documented extension points) | v1.1 / community |
-| OAuth2 provider implementation, mTLS | Stretch, tied to HTTP auth | M6 stretch |
+| OAuth2 provider implementation, mTLS | Stretch, tied to HTTP auth | M9 stretch |
 
 ---
 
@@ -360,36 +360,42 @@ Stars, npm downloads, community adapters (Redis/NATS), external contributors. Ni
 |---|---|---|
 | **Crowded market** (10+ projects, 2025–26 wave) | Differentiation erodes | Reliability-first discipline (§5): DLQ+replay stays the headline; competitive table lives in the README; do not rebuild `mcp-audit` features. |
 | **Scope creep via adapters** | Missed deadlines | Hard cap: 2 ports, 2 queue adapters, 1 store adapter in v1. New adapters = post-v1. |
-| **Maintainer bandwidth** (solo, part-time) | Half-finished repo is worse than none | 3-week cut rule: if the repo is not public after 3 weeks of part-time work, stop polishing and cut scope to *proxy + logs + DLQ + replay (SQLite)* — that is M2 — and ship it. A public M2 (per §9) beats M1–M6 half-done |
+| **Maintainer bandwidth** (solo, part-time) | Half-finished repo is worse than none | 3-week cut rule: if the repo is not public after 3 weeks of part-time work, stop polishing and cut scope to the **M0–M4 spine** (proxy + logs + retry + DLQ + replay, SQLite) and ship it. A public M4 (per §9) beats M0–M10 half-done |
 | **MCP spec/SDK churn** (spec 2026-07-28, SDK v2 line; roadmap: Agent Identity/DPoP, ETags for tool calls, standardized errors) | Protocol fidelity breaks; future spec features duplicate parts of the middleware | Pin SDK version; fidelity tests (FR-P2); **track-and-adopt policy** (§5.1): when spec features land (identity, ETags, error taxonomy), our policy/idempotency/error layers adopt them instead of keeping custom equivalents. The execution-governance gap (DLQ/replay/audit) is *not* on the spec roadmap |
 | **Replay & retry side effects** | Duplicate writes in upstream systems | Dry-run by default UX, idempotency guard (FR-R5), timeout-retry gated on per-tool `idempotent` (FR-R2), result-capturing audit links (FR-R4), explicit warnings. |
-| **Name squatting** (`mcprelay` verified free 2026-09-25; the space is crowded — `mcp-sentinel`, `mcp-gateway`, `toolgate` are all taken; names are claimed weekly) | Lose the name / discoverability | **Reserve immediately, not at publish:** npm placeholder publish now (real publish at M2, §9); GitHub repo (`github.com/yamillanz/mcprelay`) already exists — pushed and public by M2, or earlier if the 3-week rule triggers; npm scope fallback (`@yamillanz/mcprelay`) if the bare name is claimed first |
+| **Name squatting** (`mcprelay` verified free 2026-09-25; the space is crowded — `mcp-sentinel`, `mcp-gateway`, `toolgate` are all taken; names are claimed weekly) | Lose the name / discoverability | **Reserve immediately, not at publish:** npm placeholder publish at M0 (real publish at M4, §9); GitHub repo (`github.com/yamillanz/mcprelay`) already exists — pushed and public by M2, or earlier if the 3-week rule triggers; npm scope fallback (`@yamillanz/mcprelay`) if the bare name is claimed first |
 
 ---
 
 ## 12. Roadmap
 
-Each milestone is an OpenSpec change (`openspec/changes/<id>/`), is independently publishable, and exits against its acceptance criteria.
+Each milestone is an OpenSpec change (`openspec/changes/<id>/`), is independently publishable, and exits against its acceptance criteria. **Change-sizing rule:** one change = one capability, one demo beat, ≤ ~4 FRs — if a change grows past that, split it. Infra-only changes (M0) carry proposal + tasks but no delta specs — they change no capability (if `openspec validate` rejects delta-less changes, M0 runs as a plain chore instead; decided at M0 kickoff).
 
-| # | Milestone | Deliverable | Exit criteria | Est. |
+| # | OpenSpec id | Deliverable | Exit criteria | Est. |
 |---|---|---|---|---|
-| **M1** | Transparent proxy + structured logs | Wrap any stdio server; JSON log per call; correlation ids; process hygiene | Unmodified public server works end-to-end through the wrapper (FR-P2 test); logs readable | 2–3 n |
-| **M2** | **Reliability core** *(first public release)* | `QueueProvider` port + SQLite adapter; timeout, retry/backoff (failure-class semantics, D4); DLQ capture; `replay` (list/inspect/dry-run/`run <id>` — `run --all --filter` lands at M4) with result-capturing audit links | §1 demo steps 1, 3, 4 on a real server, ending on the visible side effect; durability test (NFR-5); cancellation & `isError` fidelity tests; repo public with honest README | 3–4 n |
-| **M2b** | Streamable HTTP transport | Same pipeline toward remote/HTTP servers | Filesystem + one remote server covered by the same policy/DLQ config | 2–3 n |
-| **M3** | Policy engine | YAML allow/deny, argument matchers, `--dry-run`, `policy test` | Demo step 2 (block + dry-run) works; policy suite green | 3–4 n |
-| **M4** | **RabbitMQ adapter + batch replay + compose demo** | `RabbitMqQueueProvider` (`list`/`get` semantics + topology per D5); batch replay (`run --all --filter`); `docker compose up` = middleware + RabbitMQ + example server | Same DLQ/replay flow with `queue.provider: rabbitmq`; batch redrive works; concurrent replay safe (atomic `resolve()`); compose demo reproducible | 3–4 n |
-| **M5** | Observability | Per-tool metrics in Store; `report` (table + `--json`); stretch: `/metrics` | Demo step 5 with real numbers; metrics match logs | 3–4 n |
-| **M6** | Auth + publication | API keys → identities (JWT stretch); README w/ GIF + ADRs; examples; npm publish; awesome-list PR | All §9 gating metrics green | 3–4 n |
+| **M0** | `bootstrap` | Repo scaffold: strict TS, build, vitest, lint/format; **`openspec init`** + `project.md` (PRD = product truth); CI incl. `openspec validate`; ADR-0001 (repo layout); LICENSE; CLI skeleton (`--help`, `version`, exit codes); **npm placeholder publish** (name reservation, §11) | Clean clone → `npm install && npm test` (smoke) green; `openspec validate` clean; `mcprelay --version` runs; npm name reserved | 1 n |
+| **M1** | `proxy-stdio` | Transparent stdio proxy + structured logs: FR-P1–P6, FR-O1; `run` command | Demo step 1 on a real server; FR-P2 fidelity matrix green; logs readable | 2–3 n |
+| **M2** | `retry-pipeline` | Timeout + retry with the D4 failure-class taxonomy (cancellation, `isError`, `input_required`, timeout⇄`idempotent`); config file + CLI flags (FR-C begins) | D4 class table tested; flaky server retried; cancelled calls not retried | 1–2 n |
+| **M3** | `dlq-sqlite` | DLQ capture: `QueueProvider` port + SQLite adapter (FR-R3, FR-R6); hash-raw/redact-persist (NFR-4/5); Store port + audit; `replay list/inspect`; `validate` completes FR-C1/C2 | Demo step 3; durability test (NFR-5): kill-after-error leaves the record | 2 n |
+| **M4** | `replay-cli` | Replay: `--dry-run`/`run <id>`, result capture, dedup/`--force` (FR-R4–R5), atomic `resolve()`; **first public release: repo public + real npm publish + honest README** | Demo step 4, ending on the visible side effect; `npx mcprelay` works from npm | 2 n |
+| **M5** | `policy-engine` | Policy: FR-Y1–Y6; `policy test` | Demo step 2 (block + dry-run); policy suite green | 3 n |
+| **M6** | `http-transport` | Streamable HTTP toward remote servers (same pipeline) | Filesystem + one remote server under the same policy/DLQ config | 2 n |
+| **M7** | `rabbitmq-batch` | RabbitMQ adapter (D5 topology); batch replay (`run --all --filter`); `docker compose up` demo | Same DLQ/replay flow over `queue.provider: rabbitmq`; concurrent replay safe (atomic `resolve()`); compose demo reproducible | 3–4 n |
+| **M8** | `metrics-report` | FR-O2–O3: per-tool metrics in Store; `report` (table + `--json`); retention (NFR-9). FR-O4 (`/metrics`) = its own post-M8 change if wanted | Demo step 5 with real numbers; metrics match logs | 2–3 n |
+| **M9** | `auth-identities` | FR-A1, FR-A3 (API keys → identities); FR-A2 (JWT) = post-M9 stretch | Identities feed policy decisions and `report` attribution | 2–3 n |
+| **M10** | `release-1-0` | README w/ GIF + 3–4 ADRs; `/examples` (≥3 recipes); awesome-list PRs; launch post | All §9 gating metrics green | 1–2 n |
 
-**Total:** ≈ 4–5 weeks part-time (M2b added to the original 3–4 week sketch; batch replay moved M2 → M4 so M2 ships exactly the §1 demo). Reorder rationale: the README hook (fail → DLQ → replay) ships at **M2**, not later — the differentiator is public as early as possible.
+**CLI surface as it lands:** `version` (M0) → `run` (M1) → config flags (M2) → `replay list/inspect` + `validate` (M3) → `replay --dry-run/run` (M4) → `policy test` (M5) → `report` (M8).
+
+**Total:** ≈ 21–27 nights ≈ 4–6 weeks part-time — same scope as the previous 7-milestone sketch; the split adds checkpoint ceremony, not work. The public-release path is M0–M4 (~8–10 nights), which is the unit the §11 3-week cut rule protects. Reorder rationale: the README hook (fail → DLQ → replay) ships at **M4**, not later — the differentiator is public as early as possible; HTTP moves after policy because its exit criteria already required policy/DLQ config.
 
 ---
 
 ## 13. How This PRD Feeds OpenSpec
 
 1. This document is the **product truth** (what & why). Do not put implementation detail here — it lives in `design.md` per change.
-2. Each milestone = one change: `openspec/changes/<milestone-id>/` with `proposal.md`, `design.md`, `specs/<capability>/spec.md` (delta, Given/When/Then), `tasks.md` (phased, with human approval gates).
-3. FR-* requirements here map 1:1 to delta specs (e.g. M2 emits `specs/reliability/spec.md` covering FR-R1…FR-R6). Scenario-level detail is written in the specs, not duplicated here.
+2. Each milestone = one change: `openspec/changes/<id>/` (the *OpenSpec id* column in §12) with `proposal.md`, `design.md`, `specs/<capability>/spec.md` (delta, Given/When/Then), `tasks.md` (phased, with human approval gates).
+3. FR-* requirements here map 1:1 to delta specs (e.g. `retry-pipeline` emits deltas covering FR-R1–FR-R2; `dlq-sqlite` covers FR-R3 + FR-R6; `replay-cli` covers FR-R4–FR-R5). Scenario-level detail is written in the specs, not duplicated here.
 4. After each milestone is verified: `/opsx:archive` promotes deltas into `openspec/specs/`.
 5. Notable design decisions (provider port shape, RabbitMQ topology, retry taxonomy, policy precedence) get ADRs in `docs/adr/` and are referenced from `design.md`.
 
@@ -410,7 +416,7 @@ Each milestone is an OpenSpec change (`openspec/changes/<id>/`), is independentl
 | D2 | Postgres `Store` adapter timing | v1.1 vs. stretch in M6 | v1.1 — keeps v1 cap (P4) honest | M6 |
 | D3 | Argument-rule engine depth | Simple matchers (FR-Y2) vs. JSON-Schema subset | Simple matchers for v1; revisit if users demand schema | M3 kickoff |
 | D4 | Retryable-error taxonomy | Client-supplied hints vs. heuristic classification | Heuristic class table covering: pre-execution transport vs. post-execution (upstream error / timeout), `isError: true` (no retry; opt-in capture), timeout⇄`idempotent` gating (FR-R2), per-tool override — the table itself is the M2 design.md deliverable | M2 design.md |
-| D5 | RabbitMQ adapter `list`/`get` semantics & topology | Metadata mirror / peek-via-requeue + atomic `resolve()` / durable record + event publish; DLX vs. direct durable queue | The replay path is the only list/filter consumer — favor the simplest design that keeps replay correct and concurrent-safe; in-process backoff may make a plain durable queue sufficient | M4 design.md |
+| D5 | RabbitMQ adapter `list`/`get` semantics & topology | Metadata mirror / peek-via-requeue + atomic `resolve()` / durable record + event publish; DLX vs. direct durable queue | The replay path is the only list/filter consumer — favor the simplest design that keeps replay correct and concurrent-safe; in-process backoff may make a plain durable queue sufficient | M7 design.md |
 
 ---
 
@@ -464,4 +470,4 @@ redaction:
 
 ---
 
-*Document history: v0.1 (2026-09-25) — initial draft; competitive scan of the 2026-09 ecosystem; positioning decisions (reliability-first, local-first, stdio-first, pluggable OSS providers). v0.2 (2026-09-25) — added §5.1 protocol-security boundary (MCP spec 2026-07-28 auth model + roadmap alignment), FR-P6 protocol revisions, FR-A3 no-token-passthrough, OTel `_meta` correlation, spec-churn track-and-adopt policy. v0.3 (2026-09-25) — product-only framing throughout (this document describes the solution, nothing about its origin context). v0.4 (2026-09-25) — D1 resolved: the project name is `mcprelay`. v0.5 (2026-09-25) — review pass (product + protocol + architecture): replay semantics made explicit — result → audit trail ("What replay means", §1), demo ends on the side effect, FR-R4 result capture; FR-R2 failure-class semantics (cancellation, `isError: true`, `input_required`, timeout⇄`idempotent`); FR-P2 passthrough matrix; FR-Y5/Y6; FR-R6 atomic resolve; D4 widened, D5 added (RabbitMQ `list`/`get` impedance); NFR-3 method, NFR-4 hash-raw/persist-redacted, NFR-9; batch replay moved M2 → M4; name reservation immediate; §11 cut rule harmonized with §9; Appendix A/B fixes.*
+*Document history: v0.1 (2026-09-25) — initial draft; competitive scan of the 2026-09 ecosystem; positioning decisions (reliability-first, local-first, stdio-first, pluggable OSS providers). v0.2 (2026-09-25) — added §5.1 protocol-security boundary (MCP spec 2026-07-28 auth model + roadmap alignment), FR-P6 protocol revisions, FR-A3 no-token-passthrough, OTel `_meta` correlation, spec-churn track-and-adopt policy. v0.3 (2026-09-25) — product-only framing throughout (this document describes the solution, nothing about its origin context). v0.4 (2026-09-25) — D1 resolved: the project name is `mcprelay`. v0.5 (2026-09-25) — review pass (product + protocol + architecture): replay semantics made explicit — result → audit trail ("What replay means", §1), demo ends on the side effect, FR-R4 result capture; FR-R2 failure-class semantics (cancellation, `isError: true`, `input_required`, timeout⇄`idempotent`); FR-P2 passthrough matrix; FR-Y5/Y6; FR-R6 atomic resolve; D4 widened, D5 added (RabbitMQ `list`/`get` impedance); NFR-3 method, NFR-4 hash-raw/persist-redacted, NFR-9; batch replay moved M2 → M4; name reservation immediate; §11 cut rule harmonized with §9; Appendix A/B fixes. v0.6 (2026-09-25) — roadmap restructure for OpenSpec-sized changes: M0 `bootstrap` added (scaffold, `openspec init`, CI incl. `openspec validate`, ADR-0001, npm placeholder publish); old M2 split into `retry-pipeline` (M2) / `dlq-sqlite` (M3) / `replay-cli` (M4, = first public release with real npm publish); old M6 split into `auth-identities` (M9) and `release-1-0` (M10); HTTP moved after policy (M6); RabbitMQ + batch replay at M7; change-sizing rule + CLI-surface map added; cross-references updated (FR-R4→M7, FR-O4 post-M8, FR-A→M9, §9/§11 public-release timing, D5→M7).*
