@@ -10,6 +10,8 @@
 
 Spec-driven via OpenSpec. Each milestone in PRD §12 is one change under `openspec/changes/<id>/` (proposal → design → delta specs → tasks). One change = one capability, one demo beat, ≤ ~4 FRs; split if it grows. Code is written only after the change exists. On completion, archive the change (deltas promote into `openspec/specs/`) and update the status line in [`AGENTS.md`](../AGENTS.md).
 
+**HUMAN APPROVAL GATE (AGENTS.md rule 0 — supreme, never skip).** The **human creates each change** with the command (`openspec new change <id>`, or `/opsx:propose`), **reads it** (proposal → design → delta specs → tasks), and **explicitly approves it in the session** before any implementation. Agents never create changes on their own initiative, never implement before approval, never mark tasks complete or archive without approval, and stay strictly inside the approved change's scope. **Commits and pushes are gated the same way:** never run `git commit` or `git push` — for any change or refactor to any file — without the human's explicit approval for that specific commit/push; approval to implement never covers them. Approval is per change, per commit/push, and per session, and is never assumed. If it has not been given, stop and ask.
+
 **Test-first (AGENTS.md rule 11):** every delta scenario (Given/When/Then) becomes a failing test before its implementation exists; proceed red → green → refactor, task by task. Task phases start with test-writing (see `openspec/schemas/spec-driven/templates/tasks.md`). Rule-based logic (failure classes, policy matchers, idempotency guard, redaction) gets tight unit loops; adapters get contract tests against the port interfaces. Completion metric: every delta scenario maps to a green test.
 
 ## Milestones (PRD §12)

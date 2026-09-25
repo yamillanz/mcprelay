@@ -4,6 +4,8 @@ description: Propose a new change - create it and generate all artifacts in one 
 
 Propose a new change - create the change and generate all artifacts in one step.
 
+**HUMAN APPROVAL GATE (project rule 0 — supreme, never skip):** This phase only creates artifacts for human review. Do not implement anything — no code, tests, config, or task checkmarks — until the human has read the complete change and explicitly approved it in this session. The human owns creation and approval; agents never treat their own draft as approved, and never implement from this command. If the human has not approved, stop and wait. Commits and pushes are gated the same way: never run `git commit` or `git push` without the human's explicit approval for that specific commit/push.
+
 I'll create a change with artifacts:
 - proposal.md (what & why)
 - design.md (how)

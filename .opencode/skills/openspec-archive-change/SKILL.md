@@ -11,6 +11,8 @@ metadata:
 
 Archive a completed change in the experimental workflow.
 
+**HUMAN APPROVAL GATE (project rule 0 — supreme, never skip):** Archiving is part of the change and requires the human's explicit approval in this session (the human creates and approves the change; agents never archive on their own initiative). If the human has not explicitly said to archive this change, stop and ask. Never archive to bypass incomplete tasks or missing approval. Committing or pushing the archive — or any other change — requires its own explicit human approval for that specific commit/push; never run `git commit` or `git push` without it.
+
 **Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
 **Steps**

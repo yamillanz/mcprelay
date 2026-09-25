@@ -4,6 +4,8 @@ description: Implement tasks from an OpenSpec change (Experimental)
 
 Implement tasks from an OpenSpec change.
 
+**HUMAN APPROVAL GATE (project rule 0 — supreme, never skip):** Do not start or continue implementation until the human has explicitly approved THIS change in THIS session. The human creates the change with the command (`openspec new change <id>` / `/opsx:propose`), reads it (proposal → design → delta specs → tasks), and approves it. Never create a change on your own initiative, never implement outside the approved scope, and never mark tasks complete without an approved change. No approval = stop and ask. Approval never carries over between changes or sessions. **Commits and pushes are gated the same way:** never run `git commit` or `git push` — for any change or refactor to any file — without the human's explicit approval for that specific commit/push; implementation approval does not cover them.
+
 **Input**: Optionally specify a change name (e.g., `/opsx-apply add-auth`). If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
 **Steps**
@@ -132,6 +134,8 @@ What would you like to do?
 ```
 
 **Guardrails**
+- HUMAN APPROVAL GATE (project rule 0): refuse to implement until the human has explicitly approved this change in this session; if the change is missing or approval was not given, stop and ask
+- COMMIT & PUSH GATE (project rule 0): never run `git commit` or `git push` — any file, any change or refactor — without explicit human approval for that specific commit/push; ask, state the staged scope, and wait
 - Keep going through tasks until done or blocked
 - Always read context files before starting (from the apply instructions output)
 - If task is ambiguous, pause and ask before implementing

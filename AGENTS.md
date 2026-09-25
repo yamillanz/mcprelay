@@ -2,6 +2,8 @@
 
 Operating rules for AI agents working in this repository. Applies to humans too.
 
+> **RULE 0 — HUMAN APPROVAL GATE (the supreme rule; never skip, every session).** No implementation without the human explicitly approving the OpenSpec change. The **human creates the change** with the command (`openspec new change <id>`, or `/opsx:propose`), **reads it** (proposal → design → delta specs → tasks), and **explicitly approves it**. Agents draft and wait — approval is per change and per session and is never assumed. **Commits and pushes are gated the same way: never run `git commit` or `git push` — for any change or refactor to any file — without the human's explicit approval for that specific commit/push.** Full text: rule 0 below; mirrored in `.opencode/` commands/skills and `openspec/schemas/spec-driven/schema.yaml`.
+
 ## Project context
 
 **mcprelay** — the reliability layer for MCP tool calls. A transparent, local-first middleware that wraps any stdio MCP server and adds policy, observability, and a **dead-letter queue with replay** around `tools/call`. The DLQ+replay path (retry → capture → replay) is the core differentiator — do not let it become a footnote.
@@ -13,6 +15,14 @@ Operating rules for AI agents working in this repository. Applies to humans too.
 
 ## The rules (non-negotiable)
 
+0. **HUMAN APPROVAL GATE — the supreme rule; overrides every other rule, every agent plan, and every convenience.** Every change requires explicit human approval before implementation. This is never skipped, never assumed, and never "obvious":
+   - **The human creates the change** with the command (`openspec new change <id>`, or `/opsx:propose`). Agents MUST NOT create an OpenSpec change on their own initiative — if a change does not exist, stop and ask the human to create it.
+   - **The human reads the complete change** (proposal → design → delta specs → tasks) and **explicitly approves it** (e.g. “approved”, “go”, “implement it”). An agent may draft artifacts when the human asks, but drafting is not approval and the agent must never treat its own draft as approved.
+   - **Only after that approval** may any agent implement: write code/tests/config, mark tasks complete, or archive. Implementation before approval is forbidden — always, no matter how small, clear, or urgent the work looks.
+   - **Commits and pushes need their own explicit approval.** Approval to implement a change is NOT approval to commit or push it. Before every `git commit` or `git push` — for any change or refactor to any file, including docs, config, and governance files — ask the human, state the exact staged scope and commit message, and wait for an explicit yes for *that* commit/push. No checkpoint commits, no progress pushes, no "tests pass so I'll commit". Never commit or push on your own initiative, and never treat implementation approval or a previous commit approval as covering a new one.
+   - **Approval is per change and per session, and is never assumed.** It does not carry over from a previous change, milestone, or session, and is never inferred from silence, vague encouragement, urgency, or "you already know what to do". If the human has not approved *this* change *in this session*, stop and ask.
+   - **No exceptions** for bug fixes, refactors, docs, config, one-liners, or anything outside the approved change's scope. Out-of-scope work = stop; it needs a new or updated change and a new explicit approval.
+   - Mirror points (keep the gate in sync if tooling regenerates them): `.opencode/commands/opsx-*.md`, `.opencode/skills/openspec-*/SKILL.md`, `openspec/schemas/spec-driven/schema.yaml`.
 1. **The PRD wins.** If code and the PRD disagree, the PRD is right — fix the code or file a PRD change. New behavior starts as a PRD change (with a document-history entry), never as code-first drift. Implementation detail lives in `design.md` files and ADRs, not in the PRD.
 2. **Spec-first.** Code for a milestone is written only after its OpenSpec change exists (`openspec/changes/<id>/`: proposal → design → delta specs → tasks). Size rule: one change = one capability, one demo beat, ≤ ~4 FRs — split if it grows.
 3. **Zero intrusion.** Upstream MCP servers run unmodified — no SDK patching, forks, or sidecars. `tools/call` is the only method with intercepted semantics; every other request/notification passes through unchanged (passthrough matrix, FR-P2). `tools/list` is never filtered by policy (FR-Y5).
@@ -34,12 +44,14 @@ Operating rules for AI agents working in this repository. Applies to humans too.
 
 ## Workflow
 
-1. Work only the current milestone from PRD §12. If no OpenSpec change exists for it, create it first (proposal + tasks; infra-only changes like M0 carry no delta specs).
-2. Implement task-by-task from `tasks.md`, test-first: turn a delta scenario into a failing test, make it green, refactor; keep the delta specs in sync with behavior.
-3. Verify: tests + typecheck + lint green; protocol behavior verified against a real server.
-4. On completion: archive the change (deltas → `openspec/specs/`), write ADRs for notable decisions in `docs/adr/`, update the status line above, and update the PRD document history if anything was learned that changes the product.
+1. Work only the current milestone from PRD §12. **The human creates the OpenSpec change with the command** (`openspec new change <id>`, or `/opsx:propose`) — agents never create one on their own initiative (rule 0). Infra-only changes like M0 carry proposal + tasks; capability changes carry proposal → design → delta specs → tasks.
+2. **STOP — HUMAN APPROVAL GATE (rule 0).** The human reads the complete change and explicitly approves it *in this session* before anything is implemented. No code, no tests, no config, no task checkmarks until then. If approval has not been given, ask and wait.
+3. Implement task-by-task from `tasks.md`, test-first: turn a delta scenario into a failing test, make it green, refactor; keep the delta specs in sync with behavior. Stay strictly inside the approved change's scope — anything else needs a new/updated change and a new approval.
+4. Verify: tests + typecheck + lint green; protocol behavior verified against a real server.
+5. **Commit & push gate (rule 0).** Before any `git commit` or `git push`, ask the human for explicit approval of *that* commit/push — state the exact staged scope and message — and wait. Passing tests are not approval; implementation approval is not approval to commit or push. Never commit or push partially, speculatively, or "just the docs".
+6. On completion: **ask the human before archiving** (archiving is part of the change; rule 0). Then archive the change (deltas → `openspec/specs/`), write ADRs for notable decisions in `docs/adr/`, update the status line above, and update the PRD document history if anything was learned that changes the product. Committing the result follows step 5 — with its own explicit approval.
 
-## Repository layout (target — lands at M0; do not scaffold ahead of it)
+## Repository layout (target; directories land with their milestone — do not scaffold ahead)
 
 ```
 src/          cli/ proxy/ pipeline/ queue/ store/ policy/ config/
@@ -51,11 +63,11 @@ bench/        NFR-3 overhead benchmark
 
 ## Commands
 
-None yet — this is a docs-only repo until M0 lands the toolchain (build/test/lint scripts and `openspec validate` in CI). Do not invent scaffolding before the M0 change; that ordering is the point of the method. When M0 lands, it must bake the test-first cadence (rule 11) in: change templates whose task phases start with test-writing, and CI running the suite on every PR.
+M0 landed the toolchain (2026-09-25): `npm run build | typecheck | test | lint | format:check | spec:validate`. CI (`.github/workflows/ci.yml`) runs typecheck, lint, format check, tests, build, CLI smoke, and `openspec validate --all` on Node 20 + 22 for every push/PR. The project-local `spec-driven` schema bakes in the test-first cadence (rule 11): task phases start with test-writing.
 
 ## Conventions
 
 - Conventional commits, lowercase, imperative (`docs: …`, `spec: …`, `feat: …`).
 - PRD edits bump the version + document history (italic footer). ADRs are numbered (`0001-…`) and record rejected alternatives.
 - This is a public product repo: keep all artifacts product-framed — no personal context in code, docs, or commits.
-- Never commit secrets. Keep diffs scoped to the milestone's change.
+- Never commit secrets. Keep diffs scoped to the milestone's change. Never run `git commit` or `git push` without explicit human approval for that specific commit/push (rule 0) — this applies to every change and refactor, in every file.

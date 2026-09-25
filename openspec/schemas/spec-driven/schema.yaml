@@ -156,5 +156,16 @@ apply:
   requires: [tasks]
   tracks: tasks.md
   instruction: |
+    **HUMAN APPROVAL GATE (project rule 0 — supreme; never skip, every session).**
+    Do not implement anything — no code, tests, config, or task checkmarks — until
+    the human has explicitly approved THIS change in THIS session after reading it.
+    The human creates the change with the command (`openspec new change <id>` or
+    `/opsx:propose`); agents never create changes on their own initiative. Approval
+    is per change, per session, never assumed, and never carries over. If approval
+    has not been given, stop and ask. No exceptions, no out-of-scope work.
+    **Commits and pushes are gated identically:** never run `git commit` or
+    `git push` — for any change or refactor to any file — without the human's
+    explicit approval for that specific commit/push.
+
     Read context files, work through pending tasks, mark complete as you go.
     Pause if you hit blockers or need clarification.
