@@ -7,7 +7,7 @@ Operating rules for AI agents working in this repository. Applies to humans too.
 **mcprelay** — the reliability layer for MCP tool calls. A transparent, local-first middleware that wraps any stdio MCP server and adds policy, observability, and a **dead-letter queue with replay** around `tools/call`. The DLQ+replay path (retry → capture → replay) is the core differentiator — do not let it become a footnote.
 
 - **Product truth:** [`docs/PRD.md`](docs/PRD.md) (v0.6). Everything else derives from it.
-- **Status (update this line at each milestone):** docs-only — no code yet. Next milestone: **M0 `bootstrap`** (PRD §12).
+- **Status (update this line at each milestone):** M0 `bootstrap` landed 2026-09-25 — strict TS + vitest + eslint/prettier, CI (incl. `openspec validate`), ADR-0001, CLI skeleton (`version`/`help`, exit codes). Follow-up: npm placeholder publish pending machine auth (`npm publish`). Next milestone: **M1 `proxy-stdio`** (PRD §12).
 - **Method:** spec-driven via OpenSpec — every milestone is one change; specs precede code.
 - **Acceptance spine:** the §1 60-second demo (wrap → deny → fail → DLQ → replay → report). Every milestone advances exactly one demo beat.
 
