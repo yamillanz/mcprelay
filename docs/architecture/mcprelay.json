@@ -1,0 +1,300 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "mcprelay M1 — Transparent stdio proxy",
+    "output": "mcprelay.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1090,
+      700
+    ]
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "MCP Client",
+      "sublabel": "Claude Desktop · OpenCode · agent",
+      "pos": [
+        20,
+        280
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "client-transport",
+      "type": "backend",
+      "label": "ClientTransport",
+      "sublabel": "stdin/stdout framing",
+      "tag": "batch demux",
+      "pos": [
+        210,
+        280
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "serve-stdio",
+      "type": "backend",
+      "label": "serveStdio (SDK Server)",
+      "sublabel": "client-facing MCP termination",
+      "tag": "era: 2025 / 2026-07-28",
+      "pos": [
+        430,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "bridge",
+      "type": "backend",
+      "label": "Bridge",
+      "sublabel": "tools/call interception + relay",
+      "tag": "correlation_id",
+      "pos": [
+        660,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "upstream-client",
+      "type": "backend",
+      "label": "SDK Client",
+      "sublabel": "upstream MCP termination",
+      "tag": "server/discover probe",
+      "pos": [
+        880,
+        280
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "upstream-transport",
+      "type": "backend",
+      "label": "UpstreamTransport",
+      "sublabel": "spawn + newline JSON-RPC",
+      "pos": [
+        880,
+        430
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "server",
+      "type": "external",
+      "label": "Wrapped MCP Server",
+      "sublabel": "any stdio server, unmodified",
+      "pos": [
+        880,
+        580
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "session",
+      "type": "backend",
+      "label": "Session context",
+      "sublabel": "serverInfo · capabilities · tools",
+      "tag": "in-memory",
+      "pos": [
+        660,
+        100
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "call-log",
+      "type": "database",
+      "label": "Call log",
+      "sublabel": "one JSON line per tools/call",
+      "tag": "stderr",
+      "pos": [
+        430,
+        430
+      ],
+      "size": [
+        160,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "mcprelay process — 1:1 wrap",
+      "wraps": [
+        "client-transport",
+        "serve-stdio",
+        "bridge",
+        "upstream-client",
+        "upstream-transport",
+        "session",
+        "call-log"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "upstream process",
+      "wraps": [
+        "server"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "client-in",
+      "from": "client",
+      "to": "client-transport",
+      "label": "stdio JSON-RPC",
+      "variant": "emphasis",
+      "labelAt": [
+        185,
+        258
+      ]
+    },
+    {
+      "id": "framing",
+      "from": "client-transport",
+      "to": "serve-stdio"
+    },
+    {
+      "id": "intercept",
+      "from": "serve-stdio",
+      "to": "bridge",
+      "label": "tools/call",
+      "variant": "emphasis",
+      "labelAt": [
+        635,
+        258
+      ]
+    },
+    {
+      "id": "relay",
+      "from": "bridge",
+      "to": "upstream-client",
+      "label": "+ _meta",
+      "variant": "emphasis"
+    },
+    {
+      "id": "upstream-framing",
+      "from": "upstream-client",
+      "to": "upstream-transport"
+    },
+    {
+      "id": "spawn",
+      "from": "upstream-transport",
+      "to": "server",
+      "variant": "emphasis"
+    },
+    {
+      "id": "batches",
+      "from": "client-transport",
+      "to": "upstream-transport",
+      "label": "batch frames (verbatim)",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          295,
+          560
+        ],
+        [
+          965,
+          560
+        ]
+      ],
+      "labelAt": [
+        630,
+        560
+      ]
+    },
+    {
+      "id": "server-to-client",
+      "from": "upstream-client",
+      "to": "serve-stdio",
+      "label": "sampling · elicitation · roots",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          965,
+          210
+        ],
+        [
+          520,
+          210
+        ]
+      ],
+      "labelAt": [
+        742,
+        210
+      ]
+    },
+    {
+      "id": "log",
+      "from": "bridge",
+      "to": "call-log",
+      "label": "allowed / failed",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "right",
+      "via": [
+        [
+          750,
+          462
+        ]
+      ],
+      "labelAt": [
+        670,
+        462
+      ]
+    },
+    {
+      "id": "session-context",
+      "from": "upstream-client",
+      "to": "session",
+      "label": "capabilities · revision",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "right",
+      "via": [
+        [
+          965,
+          132
+        ]
+      ],
+      "labelAt": [
+        893,
+        132
+      ]
+    }
+  ]
+}

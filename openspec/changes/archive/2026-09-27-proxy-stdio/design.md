@@ -76,7 +76,7 @@ Because SDK transports cannot carry JSON-RPC arrays, the middleware's stdio fram
 
 ### D9 — Test harness: hermetic server + raw-frame client + real-server gate
 
-- `examples/` hermetic echo server (SDK v2) implements the full matrix: echo methods, custom method, batch frames, server→client requests, progress, stderr output, and a crash switch. It is extended with failure injection in M2.
+- `examples/` hermetic echo server — a raw newline-delimited JSON-RPC fixture (not SDK-based) so the full matrix is controllable: echo methods, custom method, batch frames, server→client requests, progress, stderr output, and a crash switch. It is extended with failure injection in M2.
 - Tests use SDK clients for SDK-expressible traffic and a raw newline-JSON child-process helper for frames the SDK cannot express (batches, unknown methods, unsupported revisions).
 - The final gate (rule 10) is a real-server session against `@modelcontextprotocol/server-filesystem` plus a readable log line, recorded in `tasks.md`.
 

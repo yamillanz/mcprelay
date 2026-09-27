@@ -2,30 +2,56 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M0 scaffold — not usable yet.** The CLI currently answers `version` and `help` only. The proxy, retry pipeline, DLQ, and replay land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12.
+> **Status: M1 — transparent stdio proxy.** `mcprelay run -- <server command…>` wraps any stdio MCP server, passes the session through semantically unchanged, and logs one structured JSON line per intercepted `tools/call`. Policy, retry, DLQ, and replay land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12. The package is not published to npm yet (real publish at M4).
 
-## What it will do
+## What works today
 
-- **Wrap** one stdio MCP server transparently: `npx mcprelay -- npx @modelcontextprotocol/server-filesystem .`
-- **Policy** — allow/deny per tool and per argument, with `--dry-run`.
-- **Reliability** — timeouts, retry with backoff, and a **dead-letter queue with replay** for failed tool calls; SQLite by default, RabbitMQ opt-in via the `QueueProvider` port.
-- **Observability** — structured logs and per-tool metrics via `mcprelay report`.
+- **Wrap any stdio server** 1:1: `mcprelay run -- <server command…>` (also `mcprelay -- <server command…>`).
+- **Protocol fidelity**: everything except `tools/call` passes through semantically unchanged — `tools/list`, `resources/*`, `prompts/*`, `completion/*`, `logging/setLevel`, server→client requests (`sampling/createMessage`, `elicitation/create`, `roots/list`), progress, custom methods, and JSON-RPC batch frames.
+- **Interception**: `tools/call` gets a generated correlation id (OTel `_meta` keys preserved), latency and payload sizes, and one JSON log line on stderr per call.
+- **Process hygiene**: upstream stderr goes to stderr; an upstream crash surfaces as a standard JSON-RPC error and exit code `3`.
 
-## Development
+Exit codes: `0` success, `2` usage error, `3` upstream failure.
+
+## Try it from a clone
 
 Requires Node.js ≥ 20.19.
 
 ```sh
 npm install
-npm test              # vitest
+npm run build
+
+node dist/cli/index.js run -- npx @modelcontextprotocol/server-filesystem .
+```
+
+A call through the proxy logs one line on stderr:
+
+```json
+{
+  "timestamp": "2026-09-25T19:29:27.566Z",
+  "correlation_id": "03022cd0-…",
+  "caller": { "type": "stdio", "identity": "local" },
+  "server": "secure-filesystem-server",
+  "tool": "read_file",
+  "decision": "allowed",
+  "latency_ms": 3,
+  "request_bytes": 166,
+  "response_bytes": 2544,
+  "attempt": 1
+}
+```
+
+## Development
+
+```sh
+npm test              # vitest (CLI, proxy fidelity matrix, call logs)
 npm run typecheck
 npm run lint
 npm run format:check
 npm run build
-node dist/cli/index.js --version
 ```
 
-Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md).
+Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/).
 
 ## License
 

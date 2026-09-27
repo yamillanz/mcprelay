@@ -9,7 +9,7 @@ Operating rules for AI agents working in this repository. Applies to humans too.
 **mcprelay** — the reliability layer for MCP tool calls. A transparent, local-first middleware that wraps any stdio MCP server and adds policy, observability, and a **dead-letter queue with replay** around `tools/call`. The DLQ+replay path (retry → capture → replay) is the core differentiator — do not let it become a footnote.
 
 - **Product truth:** [`docs/PRD.md`](docs/PRD.md) (v0.6). Everything else derives from it.
-- **Status (update this line at each milestone):** M0 `bootstrap` landed 2026-09-25 — strict TS + vitest + eslint/prettier, CI (incl. `openspec validate`), ADR-0001, CLI skeleton (`version`/`help`, exit codes). Follow-up: npm placeholder publish pending machine auth (`npm publish`). Next milestone: **M1 `proxy-stdio`** (PRD §12).
+- **Status (update this line at each milestone):** M1 `proxy-stdio` landed 2026-09-25 — transparent stdio proxy (`run`), FR-P2 fidelity matrix green, structured call logs, ADR-0002, real-server check against the filesystem server. Follow-up: npm placeholder publish pending machine auth (`npm publish`). Next milestone: **M2 `retry-pipeline`** (PRD §12).
 - **Method:** spec-driven via OpenSpec — every milestone is one change; specs precede code.
 - **Acceptance spine:** the §1 60-second demo (wrap → deny → fail → DLQ → replay → report). Every milestone advances exactly one demo beat.
 
@@ -49,7 +49,7 @@ Operating rules for AI agents working in this repository. Applies to humans too.
 3. Implement task-by-task from `tasks.md`, test-first: turn a delta scenario into a failing test, make it green, refactor; keep the delta specs in sync with behavior. Stay strictly inside the approved change's scope — anything else needs a new/updated change and a new approval.
 4. Verify: tests + typecheck + lint green; protocol behavior verified against a real server.
 5. **Commit & push gate (rule 0).** Before any `git commit` or `git push`, ask the human for explicit approval of *that* commit/push — state the exact staged scope and message — and wait. Passing tests are not approval; implementation approval is not approval to commit or push. Never commit or push partially, speculatively, or "just the docs".
-6. On completion: **ask the human before archiving** (archiving is part of the change; rule 0). Then archive the change (deltas → `openspec/specs/`), write ADRs for notable decisions in `docs/adr/`, update the status line above, and update the PRD document history if anything was learned that changes the product. Committing the result follows step 5 — with its own explicit approval.
+6. On completion: **ask the human before archiving** (archiving is part of the change; rule 0). Then archive the change (deltas → `openspec/specs/`), write ADRs for notable decisions in `docs/adr/`, **update the living architecture diagram** (`docs/architecture/mcprelay.json` + re-delivered `docs/architecture/mcprelay.html`, Archify), update the status line above, and update the PRD document history if anything was learned that changes the product. Committing the result follows step 5 — with its own explicit approval.
 
 ## Repository layout (target; directories land with their milestone — do not scaffold ahead)
 
@@ -71,3 +71,4 @@ M0 landed the toolchain (2026-09-25): `npm run build | typecheck | test | lint |
 - PRD edits bump the version + document history (italic footer). ADRs are numbered (`0001-…`) and record rejected alternatives.
 - This is a public product repo: keep all artifacts product-framed — no personal context in code, docs, or commits.
 - Never commit secrets. Keep diffs scoped to the milestone's change. Never run `git commit` or `git push` without explicit human approval for that specific commit/push (rule 0) — this applies to every change and refactor, in every file.
+- **Living architecture diagram:** `docs/architecture/mcprelay.html` (interactive, generated with the Archify skill) plus its source spec `docs/architecture/mcprelay.json`. Every OpenSpec change that alters architecture, flow, or components MUST update the spec and re-deliver the HTML (validate + deliver, showcase quality) as part of the change, before archiving. Commands: `node ~/.agents/skills/archify/bin/archify.mjs validate architecture docs/architecture/mcprelay.json --quality showcase --json` then `… deliver architecture docs/architecture/mcprelay.json docs/architecture/mcprelay.html --quality showcase --json`.

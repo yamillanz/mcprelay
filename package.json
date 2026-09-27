@@ -36,7 +36,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:examples": "tsc -p tsconfig.examples.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "npm run build && npm run build:examples",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
@@ -54,5 +56,9 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.1",
     "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.1.0",
+    "@modelcontextprotocol/server": "^2.1.0"
   }
 }

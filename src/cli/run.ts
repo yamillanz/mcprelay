@@ -1,10 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
+import { runProxy } from '../proxy/run.js';
+import { packageVersion } from '../version.js';
 
-/** Process exit code for successful runs. */
-export const EXIT_OK = 0;
-
-/** Process exit code for usage errors (unknown command or option). */
-export const EXIT_USAGE = 2;
+export { EXIT_OK, EXIT_USAGE };
 
 /** Output sinks, injected so the CLI is testable without spawning a process. */
 export interface CliIO {
@@ -18,29 +16,36 @@ Usage:
   mcprelay <command> [options]
 
 Commands:
-  version   Print the mcprelay version
-  help      Show this help
+  run        Wrap a stdio MCP server: mcprelay run -- <server command…>
+             (also: mcprelay -- <server command…>)
+  version    Print the mcprelay version
+  help       Show this help
 
 Options:
   -h, --help      Show this help
   -v, --version   Print the mcprelay version
 
 Exit codes:
-  0  success
+  0  success (clean session)
   2  usage error
+  3  upstream failure (the wrapped server exited unexpectedly)
 
-Status: M0 scaffold. The proxy, retry pipeline, DLQ, and replay commands land
-in later milestones — see docs/PRD.md §12.
+Status: M1 — transparent stdio proxy with structured call logs. Policy,
+retry, DLQ, and replay land in later milestones — see docs/PRD.md §12.
 `;
-
-function packageVersion(): string {
-  const raw = readFileSync(new URL('../../package.json', import.meta.url), 'utf8');
-  return (JSON.parse(raw) as { version: string }).version;
-}
 
 function usageError(io: CliIO, message: string): number {
   io.stderr(`${message}\nRun 'mcprelay --help' for usage.\n`);
   return EXIT_USAGE;
+}
+
+async function runWith(rest: readonly string[], io: CliIO): Promise<number> {
+  const separator = rest[0];
+  const serverCommand = rest[1];
+  if (separator !== '--' || serverCommand === undefined) {
+    return usageError(io, 'Usage: mcprelay run -- <server command…>');
+  }
+  return runProxy(serverCommand, rest.slice(2), io);
 }
 
 /**
@@ -62,6 +67,10 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
   if (command === 'version' || command === '--version' || command === '-v') {
     io.stdout(`${packageVersion()}\n`);
     return EXIT_OK;
+  }
+
+  if (command === 'run' || command === '--') {
+    return runWith(command === 'run' ? rest : argv, io);
   }
 
   if (command.startsWith('-')) {
