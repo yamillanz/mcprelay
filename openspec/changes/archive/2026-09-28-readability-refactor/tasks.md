@@ -36,8 +36,8 @@ Behavior-preserving refactor: the existing suite is the test-first safety net. E
 
 - [x] 6.1 Full gate green (typecheck, lint, format, tests, build, `spec:validate`); real-server check repeated and recorded
 - [x] 6.2 Architecture diagram: not regenerated — this change alters no architecture, flow, or component (confirmed against the maintainability spec); note it here
-- [ ] 6.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-- [ ] 6.4 Human approval to archive (rule 0); archive the change after approval
+- [x] 6.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
+- [x] 6.4 Human approval to archive (rule 0); archive the change after approval
 
 ## Baseline evidence (pre-refactor, 2026-09-27)
 
