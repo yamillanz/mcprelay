@@ -1,7 +1,7 @@
 # stdio-proxy Specification
 
 ## Purpose
-TBD - created by archiving change proxy-stdio. Update Purpose after archive.
+The transparent 1:1 stdio proxy: wrapping any stdio MCP server, preserving protocol fidelity outside `tools/call`, intercepting calls for correlation and logging, process hygiene, and per-side protocol revision negotiation.
 ## Requirements
 ### Requirement: One-line stdio wrap
 

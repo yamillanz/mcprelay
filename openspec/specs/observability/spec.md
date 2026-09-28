@@ -1,7 +1,7 @@
 # observability Specification
 
 ## Purpose
-TBD - created by archiving change proxy-stdio. Update Purpose after archive.
+The structured observability surface: one JSON log line per intercepted `tools/call`, carrying correlation, latency, payload sizes, decision, and error.
 ## Requirements
 ### Requirement: One structured log line per intercepted call
 

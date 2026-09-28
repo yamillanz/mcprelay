@@ -14,6 +14,8 @@ Spec-driven via OpenSpec. Each milestone in PRD §12 is one change under `opensp
 
 **Living architecture diagram (AGENTS.md workflow step 6).** `docs/architecture/mcprelay.html` (interactive, Archify) is generated from `docs/architecture/mcprelay.json`. Every change that alters architecture, flow, or components updates the spec and re-delivers the HTML before archiving (`archify validate` + `archify deliver`, showcase quality).
 
+**Readability/performance balance (AGENTS.md conventions).** Entry points read as an ordered sequence of named steps; helpers live in the same file with descriptive names by default — no new modules, classes, or indirection without a measured reason. Extraction must not add per-call work in hot paths; performance is measured with `bench/` (NFR-3), never assumed. `docs/code-tours/` mirrors key files block-by-block and is updated when those files change.
+
 **Test-first (AGENTS.md rule 11):** every delta scenario (Given/When/Then) becomes a failing test before its implementation exists; proceed red → green → refactor, task by task. Task phases start with test-writing (see `openspec/schemas/spec-driven/templates/tasks.md`). Rule-based logic (failure classes, policy matchers, idempotency guard, redaction) gets tight unit loops; adapters get contract tests against the port interfaces. Completion metric: every delta scenario maps to a green test.
 
 ## Milestones (PRD §12)
