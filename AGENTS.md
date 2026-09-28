@@ -9,7 +9,7 @@ Operating rules for AI agents working in this repository. Applies to humans too.
 **mcprelay** — the reliability layer for MCP tool calls. A transparent, local-first middleware that wraps any stdio MCP server and adds policy, observability, and a **dead-letter queue with replay** around `tools/call`. The DLQ+replay path (retry → capture → replay) is the core differentiator — do not let it become a footnote.
 
 - **Product truth:** [`docs/PRD.md`](docs/PRD.md) (v0.6). Everything else derives from it.
-- **Status (update this line at each milestone):** M2 `retry-pipeline` landed 2026-09-28 — per-call timeout, bounded exponential-backoff retries gated by the D4 taxonomy (ADR-0003), YAML config + CLI flags, cancellation semantics, retry-aware logs, diagram updated. npm placeholder published 2026-09-28 as `@yamillanz/mcprelay@0.0.1` (bare `mcprelay` blocked by npm name-similarity with `mcp-relay`; scoped fallback per PRD §11; CLI command stays `mcprelay`). Next milestone: **M3 `dlq-sqlite`** (PRD §12).
+- **Status (update this line at each milestone):** M2 `retry-pipeline` landed 2026-09-28 — per-call timeout, bounded exponential-backoff retries gated by the D4 taxonomy (ADR-0003), YAML config + CLI flags, cancellation semantics, retry-aware logs, diagram updated. npm published 2026-09-28 as `@yamillanz/mcprelay` (0.0.1 placeholder → 0.0.2 current; bare `mcprelay` blocked by npm name-similarity with `mcp-relay`; scoped fallback per PRD §11; CLI command stays `mcprelay`). Next milestone: **M3 `dlq-sqlite`** (PRD §12).
 - **Method:** spec-driven via OpenSpec — every milestone is one change; specs precede code.
 - **Acceptance spine:** the §1 60-second demo (wrap → deny → fail → DLQ → replay → report). Every milestone advances exactly one demo beat.
 

@@ -2,7 +2,7 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M2 — classified retry pipeline.** `mcprelay run -- <server command…>` wraps any stdio MCP server, passes the session through semantically unchanged, applies a per-call timeout with bounded retries gated by the D4 failure taxonomy, and logs one structured JSON line per intercepted `tools/call`. Policy, DLQ, and replay land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12. A placeholder `0.0.1` is published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare name is blocked by npm's name-similarity policy; the scoped fallback from PRD §11 applied). The real release lands at M4.
+> **Status: M2 — classified retry pipeline.** `mcprelay run -- <server command…>` wraps any stdio MCP server, passes the session through semantically unchanged, applies a per-call timeout with bounded retries gated by the D4 failure taxonomy, and logs one structured JSON line per intercepted `tools/call`. Policy, DLQ, and replay land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12. Published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) — current version **0.0.2** (the bare `mcprelay` name is blocked by npm's name-similarity policy; the scoped fallback from PRD §11 applied). The first real release lands at M4.
 
 ## What works today
 

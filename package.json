@@ -1,6 +1,6 @@
 {
   "name": "@yamillanz/mcprelay",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "The reliability layer for MCP tool calls — local-first policy, observability, and a dead-letter queue with replay for any stdio MCP server.",
   "keywords": [
     "mcp",
