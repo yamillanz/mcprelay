@@ -1,7 +1,7 @@
 # maintainability Specification
 
 ## Purpose
-TBD - created by archiving change readability-refactor. Update Purpose after archive.
+Code-structure contract for the proxy: startup entry points read as named steps, helpers stay same-file and descriptively named, and behavior is preserved by the existing suite.
 ## Requirements
 ### Requirement: Readable bridge startup
 
