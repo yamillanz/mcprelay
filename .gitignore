@@ -8,3 +8,4 @@ docs/architecture/*.visual-check.*
 *.tsbuildinfo
 .DS_Store
 .env
+.npmrc

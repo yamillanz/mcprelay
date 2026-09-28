@@ -2,7 +2,7 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M1 — transparent stdio proxy.** `mcprelay run -- <server command…>` wraps any stdio MCP server, passes the session through semantically unchanged, and logs one structured JSON line per intercepted `tools/call`. Policy, retry, DLQ, and replay land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12. The package is not published to npm yet (real publish at M4).
+> **Status: M1 — transparent stdio proxy.** `mcprelay run -- <server command…>` wraps any stdio MCP server, passes the session through semantically unchanged, and logs one structured JSON line per intercepted `tools/call`. Policy, retry, DLQ, and replay land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12. A placeholder `0.0.1` is published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare name is blocked by npm's name-similarity policy; the scoped fallback from PRD §11 applied). The real release lands at M4.
 
 ## What works today
 
@@ -13,9 +13,15 @@
 
 Exit codes: `0` success, `2` usage error, `3` upstream failure.
 
-## Try it from a clone
+## Try it
 
 Requires Node.js ≥ 20.19.
+
+```sh
+npx @yamillanz/mcprelay run -- npx @modelcontextprotocol/server-filesystem .
+```
+
+The command installed is still `mcprelay` (the npm package is scoped). Or run it from a clone:
 
 ```sh
 npm install
