@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/client';
 import {
   Server,
+  SdkError,
+  SdkErrorCode,
   serializeMessage,
   type CallToolResult,
   type JSONRPCNotification,
@@ -14,6 +16,9 @@ import {
 import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 
 import type { CallLogEntry, CallLogger } from '../observability/call-log.js';
+import { resolveToolPolicy, type McprelayConfig } from '../config/config.js';
+import { classifyAttempt, type AttemptOutcome, type FailurePhase } from '../pipeline/classify.js';
+import { runWithRetry } from '../pipeline/retry.js';
 import { createSessionContext, recordToolInventory, type SessionContext } from './session.js';
 import { ClientTransport, UpstreamTransport, type ClientTransportOptions } from './transports.js';
 
@@ -32,6 +37,7 @@ export interface BridgeOptions {
   logger: CallLogger;
   stderr(chunk: string): void;
   version: string;
+  config: McprelayConfig;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
 }
@@ -72,10 +78,11 @@ interface CallLogFields {
   trace: TraceFields;
   tool: string;
   serverName: string;
-  decision: 'allowed' | 'failed';
+  decision: 'allowed' | 'failed' | 'cancelled';
   startedAt: number;
   requestBytes: number;
   responseBytes: number;
+  attempt: number;
   error?: { message: string; code?: number };
 }
 
@@ -83,12 +90,15 @@ type RelayRequest = (
   method: string,
   params: Record<string, unknown> | undefined,
   progressToken: unknown,
+  attemptOptions?: { timeoutMs?: number; signal?: AbortSignal },
 ) => Promise<unknown>;
 
 interface InterceptionDeps {
   relayRequest: RelayRequest;
   session: SessionContext;
   logger: CallLogger;
+  config: McprelayConfig;
+  upstreamTransport: UpstreamTransport;
 }
 
 interface PassthroughDeps {
@@ -101,6 +111,8 @@ interface ServerFactoryDeps {
   upstream: Client;
   logger: CallLogger;
   pinned: PinnedServerRef;
+  config: McprelayConfig;
+  upstreamTransport: UpstreamTransport;
 }
 
 interface CloseBridgeDeps {
@@ -251,10 +263,12 @@ function captureSessionContext(
 }
 
 function createRelayRequest(server: Server, upstream: Client): RelayRequest {
-  return async (method, params, progressToken) => {
-    const requestOptions: RequestOptions | undefined =
-      progressToken === undefined
-        ? undefined
+  return async (method, params, progressToken, attemptOptions) => {
+    const requestOptions: RequestOptions = {
+      ...(attemptOptions?.timeoutMs === undefined ? {} : { timeout: attemptOptions.timeoutMs }),
+      ...(attemptOptions?.signal === undefined ? {} : { signal: attemptOptions.signal }),
+      ...(progressToken === undefined
+        ? {}
         : {
             onprogress: (progress) => {
               void server.notification({
@@ -262,7 +276,8 @@ function createRelayRequest(server: Server, upstream: Client): RelayRequest {
                 params: { ...progress, progressToken },
               });
             },
-          };
+          }),
+    };
     return upstream.request(
       { method, params } as JSONRPCRequest,
       PASSTHROUGH_SCHEMA,
@@ -304,55 +319,111 @@ function buildCallLogEntry(fields: CallLogFields): CallLogEntry {
     latency_ms: Date.now() - fields.startedAt,
     request_bytes: fields.requestBytes,
     response_bytes: fields.responseBytes,
-    attempt: 1,
+    attempt: fields.attempt,
     ...(fields.error === undefined ? {} : { error: fields.error }),
   };
+}
+
+function failurePhase(error: unknown, signal: AbortSignal | undefined): FailurePhase {
+  if (signal?.aborted === true) return 'cancelled';
+  if (error instanceof Error && error.name === 'AbortError') return 'cancelled';
+  if (error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout) return 'timeout';
+  if (
+    error instanceof SdkError &&
+    (error.code === SdkErrorCode.NotConnected || error.code === SdkErrorCode.SendFailed)
+  ) {
+    return 'pre_send';
+  }
+  return 'post_send';
 }
 
 async function interceptToolCall(
   deps: InterceptionDeps,
   request: { params: { name: string } & Record<string, unknown> },
+  signal: AbortSignal | undefined,
 ): Promise<CallToolResult> {
   const startedAt = Date.now();
   const tool = request.params.name;
+  const policy = resolveToolPolicy(deps.config, tool);
   const { correlationId, progressToken, params, trace } = prepareCallMetadata(request.params);
   const requestBytes = byteLength(params);
 
-  try {
-    const result = await deps.relayRequest('tools/call', params, progressToken);
-    const isError = (result as { isError?: boolean }).isError === true;
+  const result = await runWithRetry({
+    attempt: async (): Promise<AttemptOutcome> => {
+      if (!deps.upstreamTransport.connected) {
+        return {
+          kind: 'error',
+          error: new Error('upstream transport is not connected'),
+          phase: 'pre_send',
+        };
+      }
+      try {
+        const value = await deps.relayRequest('tools/call', params, progressToken, {
+          timeoutMs: policy.timeoutMs,
+          ...(signal === undefined ? {} : { signal }),
+        });
+        return { kind: 'result', result: value };
+      } catch (error) {
+        return { kind: 'error', error, phase: failurePhase(error, signal) };
+      }
+    },
+    classify: (outcome) => classifyAttempt(outcome, { idempotent: policy.idempotent }),
+    policy: {
+      maxAttempts: policy.retry.maxAttempts,
+      baseMs: policy.retry.baseMs,
+      jitter: policy.retry.jitter,
+    },
+  });
+
+  const logBase = {
+    correlationId,
+    trace,
+    tool,
+    serverName: deps.session.server.name,
+    startedAt,
+    requestBytes,
+  };
+
+  if (result.outcome.kind === 'result') {
+    const value = result.outcome.result;
+    const isError = result.classification.class === 'tool_error';
     deps.logger.log(
       buildCallLogEntry({
-        correlationId,
-        trace,
-        tool,
-        serverName: deps.session.server.name,
+        ...logBase,
         decision: isError ? 'failed' : 'allowed',
-        startedAt,
-        requestBytes,
-        responseBytes: byteLength(result),
+        responseBytes: byteLength(value),
+        attempt: result.attempts,
         ...(isError ? { error: { message: 'isError result' } } : {}),
       }),
     );
-    return result as CallToolResult;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const code = (error as { code?: number }).code;
+    return value as CallToolResult;
+  }
+
+  const error = result.outcome.error;
+  if (result.classification.class === 'cancelled') {
     deps.logger.log(
       buildCallLogEntry({
-        correlationId,
-        trace,
-        tool,
-        serverName: deps.session.server.name,
-        decision: 'failed',
-        startedAt,
-        requestBytes,
+        ...logBase,
+        decision: 'cancelled',
         responseBytes: 0,
-        error: code === undefined ? { message } : { message, code },
+        attempt: result.attempts,
       }),
     );
     throw error;
   }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: number }).code;
+  deps.logger.log(
+    buildCallLogEntry({
+      ...logBase,
+      decision: 'failed',
+      responseBytes: 0,
+      attempt: result.attempts,
+      error: code === undefined ? { message } : { message, code },
+    }),
+  );
+  throw error;
 }
 
 async function relayPassthroughRequest(
@@ -384,8 +455,18 @@ function createClientServerFactory(deps: ServerFactoryDeps): () => Server {
 
     const relayRequest = createRelayRequest(server, deps.upstream);
 
-    server.setRequestHandler('tools/call', (request) =>
-      interceptToolCall({ relayRequest, session: deps.session, logger: deps.logger }, request),
+    server.setRequestHandler('tools/call', (request, ctx) =>
+      interceptToolCall(
+        {
+          relayRequest,
+          session: deps.session,
+          logger: deps.logger,
+          config: deps.config,
+          upstreamTransport: deps.upstreamTransport,
+        },
+        request,
+        ctx.mcpReq.signal,
+      ),
     );
 
     server.fallbackRequestHandler = (request) =>
@@ -441,7 +522,14 @@ export async function startBridge(options: BridgeOptions): Promise<Bridge> {
   const session = captureSessionContext(upstream, { name: 'mcprelay', version: options.version });
 
   const handle = serveStdio(
-    createClientServerFactory({ session, upstream, logger: options.logger, pinned }),
+    createClientServerFactory({
+      session,
+      upstream,
+      logger: options.logger,
+      pinned,
+      config: options.config,
+      upstreamTransport,
+    }),
     {
       transport: clientTransport,
       onerror: (error: Error) => options.stderr(`mcprelay: ${error.message}\n`),

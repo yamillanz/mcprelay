@@ -123,3 +123,17 @@ export function requestFrame(id: number, method: string, params?: unknown): unkn
     ? { jsonrpc: '2.0', id, method }
     : { jsonrpc: '2.0', id, method, params };
 }
+
+/** Waits until the child's accumulated stderr contains `text` (async flush). */
+export async function waitForStderr(
+  raw: RawSession,
+  text: string,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (raw.stderr().includes(text)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for stderr to contain ${JSON.stringify(text)}`);
+}

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
-import { requestFrame, startRaw, type RawSession } from './helpers/raw-client.js';
+import { requestFrame, startRaw, waitForStderr, type RawSession } from './helpers/raw-client.js';
 
 const CLI = fileURLToPath(new URL('../dist/cli/index.js', import.meta.url));
 const ECHO = fileURLToPath(new URL('../build/examples/echo-server/index.js', import.meta.url));
@@ -363,7 +363,7 @@ describe('FR-P4 — process hygiene', () => {
     raw.send(requestFrame(110, 'x/stderr', { marker: 'proxy-stderr-marker' }));
     const response = (await raw.nextMessage()) as { id: number; result: unknown };
     expect(response.id).toBe(110);
-    expect(raw.stderr()).toContain('proxy-stderr-marker');
+    await waitForStderr(raw, 'proxy-stderr-marker');
   });
 
   it('surfaces an upstream crash as a clean error and exits 3', async () => {

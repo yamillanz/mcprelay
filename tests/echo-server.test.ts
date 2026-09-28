@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { requestFrame, startRaw, type RawSession } from './helpers/raw-client.js';
+import { requestFrame, startRaw, waitForStderr, type RawSession } from './helpers/raw-client.js';
 
 const ECHO_SERVER = fileURLToPath(
   new URL('../build/examples/echo-server/index.js', import.meta.url),
@@ -171,7 +171,7 @@ describe('hermetic echo server', () => {
     raw.send(requestFrame(60, 'x/stderr', { marker: 'stderr-marker' }));
     const response = (await raw.nextMessage()) as { id: number };
     expect(response.id).toBe(60);
-    expect(raw.stderr()).toContain('stderr-marker');
+    await waitForStderr(raw, 'stderr-marker');
   });
 
   it('exits when the crash tool is called', async () => {

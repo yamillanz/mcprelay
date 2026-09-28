@@ -16,10 +16,15 @@ Usage:
   mcprelay <command> [options]
 
 Commands:
-  run        Wrap a stdio MCP server: mcprelay run -- <server command…>
-             (also: mcprelay -- <server command…>)
+  run        Wrap a stdio MCP server: mcprelay run [options] -- <server command…>
+             (also: mcprelay [options] -- <server command…>)
   version    Print the mcprelay version
   help       Show this help
+
+Run options:
+  --config <path>       Config file (default ./mcprelay.config.yaml)
+  --timeout-ms <ms>     Per-call timeout; overrides the config file
+  --max-attempts <n>    Retry bound; overrides the config file
 
 Options:
   -h, --help      Show this help
@@ -27,25 +32,84 @@ Options:
 
 Exit codes:
   0  success (clean session)
-  2  usage error
+  2  usage or configuration error
   3  upstream failure (the wrapped server exited unexpectedly)
 
-Status: M1 — transparent stdio proxy with structured call logs. Policy,
-retry, DLQ, and replay land in later milestones — see docs/PRD.md §12.
+Status: M2 — transparent stdio proxy with timeout, classified retries, and
+structured call logs. Policy, DLQ, and replay land in later milestones — see
+docs/PRD.md §12.
 `;
+
+interface RunInvocation {
+  command: string;
+  args: string[];
+  configPath?: string;
+  timeoutMs?: number;
+  maxAttempts?: number;
+}
+
+type ParsedRun = { ok: true; invocation: RunInvocation } | { ok: false; message: string };
+
+const RUN_USAGE = 'Usage: mcprelay run [options] -- <server command…>';
+
+function parseRunInvocation(tokens: readonly string[]): ParsedRun {
+  let configPath: string | undefined;
+  let timeoutMs: number | undefined;
+  let maxAttempts: number | undefined;
+  let index = 0;
+
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === undefined || token === '--') break;
+    if (token === '--config' || token === '--timeout-ms' || token === '--max-attempts') {
+      const value = tokens[index + 1];
+      if (value === undefined) return { ok: false, message: `Missing value for '${token}'.` };
+      if (token === '--config') {
+        configPath = value;
+      } else {
+        const parsed = Number(value);
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          return { ok: false, message: `Invalid value for '${token}': ${value}` };
+        }
+        if (token === '--timeout-ms') timeoutMs = parsed;
+        else maxAttempts = parsed;
+      }
+      index += 2;
+      continue;
+    }
+    return { ok: false, message: `Unknown option '${token}'.` };
+  }
+
+  if (tokens[index] !== '--' || tokens[index + 1] === undefined) {
+    return { ok: false, message: RUN_USAGE };
+  }
+
+  return {
+    ok: true,
+    invocation: {
+      command: tokens[index + 1] as string,
+      args: tokens.slice(index + 2),
+      ...(configPath === undefined ? {} : { configPath }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(maxAttempts === undefined ? {} : { maxAttempts }),
+    },
+  };
+}
 
 function usageError(io: CliIO, message: string): number {
   io.stderr(`${message}\nRun 'mcprelay --help' for usage.\n`);
   return EXIT_USAGE;
 }
 
-async function runWith(rest: readonly string[], io: CliIO): Promise<number> {
-  const separator = rest[0];
-  const serverCommand = rest[1];
-  if (separator !== '--' || serverCommand === undefined) {
-    return usageError(io, 'Usage: mcprelay run -- <server command…>');
-  }
-  return runProxy(serverCommand, rest.slice(2), io);
+async function runWith(tokens: readonly string[], io: CliIO): Promise<number> {
+  const parsed = parseRunInvocation(tokens);
+  if (!parsed.ok) return usageError(io, parsed.message);
+  const { command, args, configPath, timeoutMs, maxAttempts } = parsed.invocation;
+  return runProxy(command, args, io, {
+    ...(configPath === undefined ? {} : { configPath }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(maxAttempts === undefined ? {} : { maxAttempts }),
+  });
 }
 
 /**
@@ -69,7 +133,13 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
     return EXIT_OK;
   }
 
-  if (command === 'run' || command === '--') {
+  if (
+    command === 'run' ||
+    command === '--' ||
+    command === '--config' ||
+    command === '--timeout-ms' ||
+    command === '--max-attempts'
+  ) {
     return runWith(command === 'run' ? rest : argv, io);
   }
 

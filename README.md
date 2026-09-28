@@ -2,16 +2,36 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M1 — transparent stdio proxy.** `mcprelay run -- <server command…>` wraps any stdio MCP server, passes the session through semantically unchanged, and logs one structured JSON line per intercepted `tools/call`. Policy, retry, DLQ, and replay land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12. A placeholder `0.0.1` is published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare name is blocked by npm's name-similarity policy; the scoped fallback from PRD §11 applied). The real release lands at M4.
+> **Status: M2 — classified retry pipeline.** `mcprelay run -- <server command…>` wraps any stdio MCP server, passes the session through semantically unchanged, applies a per-call timeout with bounded retries gated by the D4 failure taxonomy, and logs one structured JSON line per intercepted `tools/call`. Policy, DLQ, and replay land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12. A placeholder `0.0.1` is published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare name is blocked by npm's name-similarity policy; the scoped fallback from PRD §11 applied). The real release lands at M4.
 
 ## What works today
 
 - **Wrap any stdio server** 1:1: `mcprelay run -- <server command…>` (also `mcprelay -- <server command…>`).
 - **Protocol fidelity**: everything except `tools/call` passes through semantically unchanged — `tools/list`, `resources/*`, `prompts/*`, `completion/*`, `logging/setLevel`, server→client requests (`sampling/createMessage`, `elicitation/create`, `roots/list`), progress, custom methods, and JSON-RPC batch frames.
-- **Interception**: `tools/call` gets a generated correlation id (OTel `_meta` keys preserved), latency and payload sizes, and one JSON log line on stderr per call.
+- **Timeout + classified retries**: each call has a configurable timeout; transient failures retry with exponential backoff, gated by the D4 taxonomy — timeouts and upstream errors retry only for tools marked `idempotent: true`, `isError` results never retry, protocol errors never retry, and client cancellation aborts without retrying.
+- **Interception**: `tools/call` gets a generated correlation id (OTel `_meta` keys preserved), latency and payload sizes, and one JSON log line on stderr per call with the real attempt count.
 - **Process hygiene**: upstream stderr goes to stderr; an upstream crash surfaces as a standard JSON-RPC error and exit code `3`.
 
-Exit codes: `0` success, `2` usage error, `3` upstream failure.
+Exit codes: `0` success, `2` usage or configuration error, `3` upstream failure.
+
+## Configuration
+
+`./mcprelay.config.yaml` (or `--config <path>`) configures reliability; with no file, safe defaults apply (timeout 30 s, retries on, tools non-idempotent):
+
+```yaml
+reliability:
+  timeout_ms: 30000
+  retry:
+    max_attempts: 3 # total attempts, including the first
+    backoff: exponential
+    base_ms: 250
+    jitter: true
+  per_tool:
+    slow_tool: { timeout_ms: 120000, retry: { max_attempts: 1 } }
+    create_issue: { idempotent: true } # timed-out calls retry only for idempotent tools
+```
+
+CLI flags override file values: `--timeout-ms <ms>`, `--max-attempts <n>`. A malformed known section aborts startup with the config path and field; unknown top-level sections only warn.
 
 ## Try it
 

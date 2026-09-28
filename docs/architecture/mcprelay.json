@@ -2,12 +2,12 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "mcprelay M1 — Transparent stdio proxy",
+    "title": "mcprelay M2 — classified retry pipeline",
     "output": "mcprelay.html",
     "quality_profile": "showcase",
     "viewBox": [
-      1090,
-      700
+      1040,
+      540
     ]
   },
   "components": [
@@ -15,13 +15,13 @@
       "id": "client",
       "type": "external",
       "label": "MCP Client",
-      "sublabel": "Claude Desktop · OpenCode · agent",
+      "sublabel": "Claude · OpenCode · agent",
       "pos": [
         20,
-        280
+        190
       ],
       "size": [
-        150,
+        130,
         64
       ]
     },
@@ -32,11 +32,11 @@
       "sublabel": "stdin/stdout framing",
       "tag": "batch demux",
       "pos": [
-        210,
-        280
+        176,
+        190
       ],
       "size": [
-        170,
+        140,
         64
       ]
     },
@@ -47,11 +47,11 @@
       "sublabel": "client-facing MCP termination",
       "tag": "era: 2025 / 2026-07-28",
       "pos": [
-        430,
-        280
+        342,
+        190
       ],
       "size": [
-        180,
+        150,
         64
       ]
     },
@@ -59,14 +59,29 @@
       "id": "bridge",
       "type": "backend",
       "label": "Bridge",
-      "sublabel": "tools/call interception + relay",
+      "sublabel": "tools/call interception",
       "tag": "correlation_id",
       "pos": [
-        660,
-        280
+        518,
+        190
       ],
       "size": [
-        180,
+        150,
+        64
+      ]
+    },
+    {
+      "id": "retry-pipeline",
+      "type": "backend",
+      "label": "Retry pipeline",
+      "sublabel": "D4 classify · backoff · bounds",
+      "tag": "timeout 30s",
+      "pos": [
+        694,
+        190
+      ],
+      "size": [
+        150,
         64
       ]
     },
@@ -77,11 +92,11 @@
       "sublabel": "upstream MCP termination",
       "tag": "server/discover probe",
       "pos": [
-        880,
-        280
+        870,
+        190
       ],
       "size": [
-        170,
+        150,
         64
       ]
     },
@@ -91,11 +106,11 @@
       "label": "UpstreamTransport",
       "sublabel": "spawn + newline JSON-RPC",
       "pos": [
-        880,
-        430
+        870,
+        330
       ],
       "size": [
-        170,
+        150,
         64
       ]
     },
@@ -105,11 +120,11 @@
       "label": "Wrapped MCP Server",
       "sublabel": "any stdio server, unmodified",
       "pos": [
-        880,
-        580
+        870,
+        450
       ],
       "size": [
-        170,
+        150,
         64
       ]
     },
@@ -120,11 +135,26 @@
       "sublabel": "serverInfo · capabilities · tools",
       "tag": "in-memory",
       "pos": [
-        660,
-        100
+        518,
+        60
       ],
       "size": [
-        160,
+        150,
+        64
+      ]
+    },
+    {
+      "id": "config",
+      "type": "backend",
+      "label": "Config",
+      "sublabel": "mcprelay.config.yaml",
+      "tag": "defaults · CLI flags",
+      "pos": [
+        694,
+        330
+      ],
+      "size": [
+        150,
         64
       ]
     },
@@ -135,11 +165,11 @@
       "sublabel": "one JSON line per tools/call",
       "tag": "stderr",
       "pos": [
-        430,
-        430
+        518,
+        330
       ],
       "size": [
-        160,
+        150,
         64
       ]
     }
@@ -152,18 +182,22 @@
         "client-transport",
         "serve-stdio",
         "bridge",
+        "retry-pipeline",
         "upstream-client",
         "upstream-transport",
         "session",
+        "config",
         "call-log"
-      ]
+      ],
+      "pad": 12
     },
     {
       "kind": "region",
       "label": "upstream process",
       "wraps": [
         "server"
-      ]
+      ],
+      "pad": 12
     }
   ],
   "connections": [
@@ -174,8 +208,8 @@
       "label": "stdio JSON-RPC",
       "variant": "emphasis",
       "labelAt": [
-        185,
-        258
+        160,
+        168
       ]
     },
     {
@@ -190,16 +224,25 @@
       "label": "tools/call",
       "variant": "emphasis",
       "labelAt": [
-        635,
-        258
+        510,
+        168
       ]
     },
     {
-      "id": "relay",
+      "id": "attempts",
       "from": "bridge",
-      "to": "upstream-client",
-      "label": "+ _meta",
-      "variant": "emphasis"
+      "to": "retry-pipeline",
+      "label": "attempts",
+      "variant": "emphasis",
+      "labelAt": [
+        681,
+        168
+      ]
+    },
+    {
+      "id": "retry-relay",
+      "from": "retry-pipeline",
+      "to": "upstream-client"
     },
     {
       "id": "upstream-framing",
@@ -210,7 +253,24 @@
       "id": "spawn",
       "from": "upstream-transport",
       "to": "server",
-      "variant": "emphasis"
+      "variant": "emphasis",
+      "labelAt": [
+        945,
+        415
+      ]
+    },
+    {
+      "id": "config-policy",
+      "from": "config",
+      "to": "retry-pipeline",
+      "label": "policy",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        800,
+        287
+      ]
     },
     {
       "id": "batches",
@@ -222,17 +282,17 @@
       "toSide": "bottom",
       "via": [
         [
-          295,
-          560
+          246,
+          425
         ],
         [
-          965,
-          560
+          945,
+          425
         ]
       ],
       "labelAt": [
-        630,
-        560
+        595,
+        425
       ]
     },
     {
@@ -245,36 +305,17 @@
       "toSide": "top",
       "via": [
         [
-          965,
-          210
+          945,
+          30
         ],
         [
-          520,
-          210
+          417,
+          30
         ]
       ],
       "labelAt": [
-        742,
-        210
-      ]
-    },
-    {
-      "id": "log",
-      "from": "bridge",
-      "to": "call-log",
-      "label": "allowed / failed",
-      "variant": "dashed",
-      "fromSide": "bottom",
-      "toSide": "right",
-      "via": [
-        [
-          750,
-          462
-        ]
-      ],
-      "labelAt": [
-        670,
-        462
+        680,
+        30
       ]
     },
     {
@@ -284,16 +325,33 @@
       "label": "capabilities · revision",
       "variant": "dashed",
       "fromSide": "top",
-      "toSide": "right",
+      "toSide": "bottom",
       "via": [
         [
-          965,
-          132
+          945,
+          150
+        ],
+        [
+          593,
+          150
         ]
       ],
       "labelAt": [
-        893,
-        132
+        770,
+        150
+      ]
+    },
+    {
+      "id": "log",
+      "from": "bridge",
+      "to": "call-log",
+      "label": "allowed / failed / cancelled",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        593,
+        287
       ]
     }
   ]

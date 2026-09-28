@@ -66,6 +66,16 @@ const TOOLS: Json = [
   },
   { name: 'sleep', description: 'Waits before answering', inputSchema: { type: 'object' } },
   { name: 'crash', description: 'Exits the process mid-call', inputSchema: { type: 'object' } },
+  {
+    name: 'flaky',
+    description: 'Fails with -32000 for the first N calls',
+    inputSchema: { type: 'object' },
+  },
+  {
+    name: 'flaky-protocol',
+    description: 'Always fails with -32602',
+    inputSchema: { type: 'object' },
+  },
 ];
 
 const modernMode = process.argv.includes('--modern');
@@ -73,6 +83,7 @@ let era: 'legacy' | 'modern' = modernMode ? 'modern' : 'legacy';
 let nextServerRequestId = 1000;
 let toolCallCount = 0;
 let inputBuffer = '';
+const toolCounts: Record<string, number> = {};
 const receivedNotifications: Frame[] = [];
 const pendingServerRequests = new Map<number, (response: Frame) => void>();
 
@@ -116,10 +127,21 @@ async function callTool(params: Json, id: string | number): Promise<ResponseFram
   const args = asRecord(record.arguments);
   const meta = asRecord(record._meta);
   toolCallCount += 1;
+  const callNumber = (toolCounts[name] ?? 0) + 1;
+  toolCounts[name] = callNumber;
 
   switch (name) {
     case 'echo':
       return ok(id, { content: [{ type: 'text', text: JSON.stringify(args) }] });
+    case 'flaky': {
+      const failTimes = typeof args.fail_times === 'number' ? args.fail_times : 2;
+      if (callNumber <= failTimes) {
+        return errorFrame(id, -32000, `flaky failure ${callNumber}`);
+      }
+      return ok(id, { content: [{ type: 'text', text: `flaky success on call ${callNumber}` }] });
+    }
+    case 'flaky-protocol':
+      return errorFrame(id, -32602, 'invalid params (hermetic)');
     case 'echo-meta':
       return ok(id, {
         content: [{ type: 'text', text: JSON.stringify({ arguments: args, meta }) }],
@@ -254,7 +276,7 @@ async function handleRequest(frame: Frame): Promise<ResponseFrame> {
         })),
       });
     case 'x/stats':
-      return ok(id, { toolCalls: toolCallCount });
+      return ok(id, { toolCalls: toolCallCount, perTool: { ...toolCounts } });
     case 'x/notify':
       write({ jsonrpc: '2.0', method: 'notifications/x/custom', params: { from: 'echo-server' } });
       return ok(id, {});
