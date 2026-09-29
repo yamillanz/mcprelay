@@ -51,7 +51,7 @@ Test-first (rule 11): each delta scenario becomes a failing test before its impl
 - [x] 9.1 Full gate green: `npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run spec:validate`
 - [x] 9.2 Real-server gate (demo step 4): filesystem `write_file` to a missing directory fails and is captured; after fixing the directory, `replay run <id>` writes the file (visible side effect) and the audit entry holds the replay's result; record evidence here
 - [x] 9.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-- [ ] 9.4 Human approval to archive (rule 0); archive the change after approval
+- [x] 9.4 Human approval to archive (rule 0); archive the change after approval
 
 ## Verification results — 2026-09-29 (Node v22.17.0)
 
