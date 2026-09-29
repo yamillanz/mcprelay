@@ -53,7 +53,7 @@ Test-first (rule 11): each delta scenario becomes a failing test before its impl
 - [x] 8.1 Full gate green: `npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run spec:validate`
 - [x] 8.2 Real-server check: filesystem session through the proxy with the new config sections; `replay list` reads the shared DB; record evidence here
 - [x] 8.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-- [ ] 8.4 Human approval to archive (rule 0); archive the change after approval
+- [x] 8.4 Human approval to archive (rule 0); archive the change after approval
 
 ## Verification results — 2026-09-29 (Node v22.17.0)
 
