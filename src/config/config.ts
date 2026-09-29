@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 
 import { parse as parseYaml } from 'yaml';
 
+import { DEFAULT_REDACTION_PATTERNS } from '../redaction/redact.js';
+
 /** Configuration error: message always names the config path and the field. */
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -23,6 +25,7 @@ export interface ToolOverride {
   idempotent?: boolean;
   effects?: 'read' | 'write';
   retry?: Partial<RetryConfig>;
+  captureToolErrors?: boolean;
 }
 
 export interface ReliabilityConfig {
@@ -32,8 +35,25 @@ export interface ReliabilityConfig {
   perTool: Record<string, ToolOverride>;
 }
 
+export interface QueueConfig {
+  provider: 'sqlite';
+  sqlite: { path: string };
+}
+
+export interface StoreConfig {
+  provider: 'sqlite';
+  sqlite: { path: string };
+}
+
+export interface RedactionConfig {
+  patterns: string[];
+}
+
 export interface McprelayConfig {
   reliability: ReliabilityConfig;
+  queue: QueueConfig;
+  store: StoreConfig;
+  redaction: RedactionConfig;
   warnings: string[];
 }
 
@@ -46,12 +66,22 @@ export interface ToolPolicy {
   timeoutMs: number;
   retry: RetryConfig;
   idempotent: boolean;
+  captureToolErrors: boolean;
 }
 
 const DEFAULT_CONFIG_PATH = 'mcprelay.config.yaml';
 const RELIABILITY_KEYS = new Set(['timeout_ms', 'idempotent_default', 'retry', 'per_tool']);
 const RETRY_KEYS = new Set(['max_attempts', 'backoff', 'base_ms', 'jitter']);
-const PER_TOOL_KEYS = new Set(['timeout_ms', 'idempotent', 'effects', 'retry']);
+const PER_TOOL_KEYS = new Set([
+  'timeout_ms',
+  'idempotent',
+  'effects',
+  'retry',
+  'capture_tool_errors',
+]);
+const QUEUE_KEYS = new Set(['provider', 'sqlite']);
+const SQLITE_KEYS = new Set(['path']);
+const REDACTION_KEYS = new Set(['patterns']);
 
 export function defaultConfig(): McprelayConfig {
   return {
@@ -61,6 +91,9 @@ export function defaultConfig(): McprelayConfig {
       idempotentDefault: false,
       perTool: {},
     },
+    queue: { provider: 'sqlite', sqlite: { path: './.mcprelay/queue.db' } },
+    store: { provider: 'sqlite', sqlite: { path: './.mcprelay/history.db' } },
+    redaction: { patterns: [...DEFAULT_REDACTION_PATTERNS] },
     warnings: [],
   };
 }
@@ -71,6 +104,7 @@ export function resolveToolPolicy(config: McprelayConfig, tool: string): ToolPol
     timeoutMs: override?.timeoutMs ?? config.reliability.timeoutMs,
     retry: { ...config.reliability.retry, ...(override?.retry ?? {}) },
     idempotent: override?.idempotent ?? config.reliability.idempotentDefault,
+    captureToolErrors: override?.captureToolErrors ?? false,
   };
 }
 
@@ -146,6 +180,12 @@ function parsePerToolOverride(raw: unknown, label: string): ToolOverride {
     parseRetryFields(raw.retry, `${label}.retry`, retry);
     override.retry = retry;
   }
+  if ('capture_tool_errors' in raw) {
+    override.captureToolErrors = requireBoolean(
+      raw.capture_tool_errors,
+      `${label}.capture_tool_errors`,
+    );
+  }
   return override;
 }
 
@@ -217,19 +257,70 @@ function parseConfigDocument(text: string, path: string): Record<string, unknown
   return raw;
 }
 
+const TOP_LEVEL_KEYS = new Set(['reliability', 'queue', 'store', 'redaction']);
+
+function applySqliteSection(
+  target: { provider: 'sqlite'; sqlite: { path: string } },
+  raw: unknown,
+  label: string,
+): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
+  assertKnownKeys(raw, QUEUE_KEYS, label);
+
+  if ('provider' in raw) {
+    if (raw.provider !== 'sqlite') {
+      throw new ConfigError(
+        `${label}.provider: expected 'sqlite', got ${JSON.stringify(raw.provider)}`,
+      );
+    }
+    target.provider = 'sqlite';
+  }
+  if ('sqlite' in raw) {
+    const sqlite = raw.sqlite;
+    if (!isRecord(sqlite)) throw new ConfigError(`${label}.sqlite: expected a mapping`);
+    assertKnownKeys(sqlite, SQLITE_KEYS, `${label}.sqlite`);
+    if ('path' in sqlite) {
+      if (typeof sqlite.path !== 'string' || sqlite.path.length === 0) {
+        throw new ConfigError(
+          `${label}.sqlite.path: expected a non-empty string, got ${JSON.stringify(sqlite.path)}`,
+        );
+      }
+      target.sqlite.path = sqlite.path;
+    }
+  }
+}
+
+function applyRedaction(config: McprelayConfig, raw: unknown, label: string): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
+  assertKnownKeys(raw, REDACTION_KEYS, label);
+  if ('patterns' in raw) {
+    const patterns = raw.patterns;
+    if (
+      !Array.isArray(patterns) ||
+      patterns.some((entry) => typeof entry !== 'string' || entry.length === 0)
+    ) {
+      throw new ConfigError(`${label}.patterns: expected an array of non-empty strings`);
+    }
+    config.redaction.patterns = patterns as string[];
+  }
+}
+
 function applyConfigDocument(
   config: McprelayConfig,
   document: Record<string, unknown>,
   path: string,
 ): void {
   for (const key of Object.keys(document)) {
-    if (key !== 'reliability') {
+    if (!TOP_LEVEL_KEYS.has(key)) {
       config.warnings.push(
         `${path}: unknown top-level section '${key}' ignored (not implemented yet)`,
       );
     }
   }
   if ('reliability' in document) applyReliability(config, document.reliability, path);
+  if ('queue' in document) applySqliteSection(config.queue, document.queue, `${path}: queue`);
+  if ('store' in document) applySqliteSection(config.store, document.store, `${path}: store`);
+  if ('redaction' in document) applyRedaction(config, document.redaction, `${path}: redaction`);
 }
 
 function applyOverrides(config: McprelayConfig, overrides: ConfigOverrides | undefined): void {

@@ -1,5 +1,7 @@
 import { EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
+import { loadConfig } from '../config/config.js';
 import { runProxy } from '../proxy/run.js';
+import { runReplay } from '../replay/replay-cli.js';
 import { packageVersion } from '../version.js';
 
 export { EXIT_OK, EXIT_USAGE };
@@ -18,6 +20,8 @@ Usage:
 Commands:
   run        Wrap a stdio MCP server: mcprelay run [options] -- <server command…>
              (also: mcprelay [options] -- <server command…>)
+  replay     Inspect the dead-letter queue: replay list | replay inspect <id>
+  validate   Check the configuration and report precise errors
   version    Print the mcprelay version
   help       Show this help
 
@@ -32,12 +36,12 @@ Options:
 
 Exit codes:
   0  success (clean session)
+  1  the command ran but failed (record not found, database error)
   2  usage or configuration error
   3  upstream failure (the wrapped server exited unexpectedly)
 
-Status: M2 — transparent stdio proxy with timeout, classified retries, and
-structured call logs. Policy, DLQ, and replay land in later milestones — see
-docs/PRD.md §12.
+Status: M3 — durable DLQ capture, redaction, and replay inspection. Policy
+and replay execution land in later milestones — see docs/PRD.md §12.
 `;
 
 interface RunInvocation {
@@ -101,6 +105,32 @@ function usageError(io: CliIO, message: string): number {
   return EXIT_USAGE;
 }
 
+async function runValidate(tokens: readonly string[], io: CliIO): Promise<number> {
+  let configPath: string | undefined;
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === '--config') {
+      const value = tokens[index + 1];
+      if (value === undefined) return usageError(io, "Missing value for '--config'.");
+      configPath = value;
+      index += 2;
+      continue;
+    }
+    return usageError(io, `Unknown option '${token}'.`);
+  }
+
+  try {
+    const config = loadConfig(configPath === undefined ? {} : { path: configPath });
+    for (const warning of config.warnings) io.stderr(`mcprelay: warning: ${warning}\n`);
+    io.stdout(`config ok: ${configPath ?? 'defaults (no mcprelay.config.yaml)'}\n`);
+    return EXIT_OK;
+  } catch (error) {
+    io.stderr(`mcprelay: ${error instanceof Error ? error.message : String(error)}\n`);
+    return EXIT_USAGE;
+  }
+}
+
 async function runWith(tokens: readonly string[], io: CliIO): Promise<number> {
   const parsed = parseRunInvocation(tokens);
   if (!parsed.ok) return usageError(io, parsed.message);
@@ -131,6 +161,14 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
   if (command === 'version' || command === '--version' || command === '-v') {
     io.stdout(`${packageVersion()}\n`);
     return EXIT_OK;
+  }
+
+  if (command === 'validate') {
+    return runValidate(rest, io);
+  }
+
+  if (command === 'replay') {
+    return runReplay(rest, io);
   }
 
   if (

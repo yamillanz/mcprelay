@@ -17,6 +17,13 @@ import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server
 
 import type { CallLogEntry, CallLogger } from '../observability/call-log.js';
 import { resolveToolPolicy, type McprelayConfig } from '../config/config.js';
+import { hashArguments, redactMessage, redactValue } from '../redaction/redact.js';
+import {
+  failureClassFromD4,
+  newFailureRecordId,
+  type FailureRecord,
+} from '../queue/failure-record.js';
+import { createPersistence, type Persistence } from '../queue/providers.js';
 import { classifyAttempt, type AttemptOutcome, type FailurePhase } from '../pipeline/classify.js';
 import { runWithRetry } from '../pipeline/retry.js';
 import { createSessionContext, recordToolInventory, type SessionContext } from './session.js';
@@ -99,6 +106,9 @@ interface InterceptionDeps {
   logger: CallLogger;
   config: McprelayConfig;
   upstreamTransport: UpstreamTransport;
+  persistence: Persistence;
+  serverCommand: string;
+  stderr: (chunk: string) => void;
 }
 
 interface PassthroughDeps {
@@ -113,6 +123,9 @@ interface ServerFactoryDeps {
   pinned: PinnedServerRef;
   config: McprelayConfig;
   upstreamTransport: UpstreamTransport;
+  persistence: Persistence;
+  serverCommand: string;
+  stderr: (chunk: string) => void;
 }
 
 interface CloseBridgeDeps {
@@ -120,6 +133,7 @@ interface CloseBridgeDeps {
   upstream: Client;
   handle: StdioServerHandle;
   clientTransport: ClientTransport;
+  persistence: Persistence;
 }
 
 function byteLength(value: unknown): number {
@@ -337,6 +351,52 @@ function failurePhase(error: unknown, signal: AbortSignal | undefined): FailureP
   return 'post_send';
 }
 
+interface CaptureInput {
+  tool: string;
+  correlationId: string;
+  rawArguments: unknown;
+  failureClass: FailureRecord['failure']['class'];
+  message: string;
+  attempts: number;
+}
+
+/** Durable, redacted capture; never blocks the client if persistence fails. */
+async function captureFailure(deps: InterceptionDeps, input: CaptureInput): Promise<void> {
+  const patterns = deps.config.redaction.patterns;
+  const record: FailureRecord = {
+    id: newFailureRecordId(),
+    correlation_id: input.correlationId,
+    captured_at: new Date().toISOString(),
+    caller: { type: 'stdio', identity: 'local' },
+    server: { name: deps.session.server.name, command: deps.serverCommand },
+    tool: {
+      name: input.tool,
+      arguments_hash: hashArguments(input.rawArguments),
+      arguments: redactValue(input.rawArguments, patterns),
+    },
+    failure: {
+      class: input.failureClass,
+      message: redactMessage(input.message, patterns),
+      attempts: input.attempts,
+    },
+    replay: { status: 'pending', attempts: [], last_outcome: null },
+  };
+
+  try {
+    await deps.persistence.getQueue().enqueue(record);
+    await deps.persistence.getStore().audit({
+      kind: 'captured',
+      correlationId: input.correlationId,
+      failureId: record.id,
+      toolName: input.tool,
+    });
+  } catch (error) {
+    deps.stderr(
+      `mcprelay: capture failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
 async function interceptToolCall(
   deps: InterceptionDeps,
   request: { params: { name: string } & Record<string, unknown> },
@@ -387,6 +447,16 @@ async function interceptToolCall(
   if (result.outcome.kind === 'result') {
     const value = result.outcome.result;
     const isError = result.classification.class === 'tool_error';
+    if (isError && policy.captureToolErrors) {
+      await captureFailure(deps, {
+        tool,
+        correlationId,
+        rawArguments: request.params.arguments,
+        failureClass: 'tool_error',
+        message: 'isError result',
+        attempts: result.attempts,
+      });
+    }
     deps.logger.log(
       buildCallLogEntry({
         ...logBase,
@@ -400,6 +470,8 @@ async function interceptToolCall(
   }
 
   const error = result.outcome.error;
+  const message = error instanceof Error ? error.message : String(error);
+
   if (result.classification.class === 'cancelled') {
     deps.logger.log(
       buildCallLogEntry({
@@ -412,7 +484,18 @@ async function interceptToolCall(
     throw error;
   }
 
-  const message = error instanceof Error ? error.message : String(error);
+  const recordClass = failureClassFromD4(result.classification.class);
+  if (recordClass !== undefined) {
+    await captureFailure(deps, {
+      tool,
+      correlationId,
+      rawArguments: request.params.arguments,
+      failureClass: recordClass,
+      message,
+      attempts: result.attempts,
+    });
+  }
+
   const code = (error as { code?: number }).code;
   deps.logger.log(
     buildCallLogEntry({
@@ -463,6 +546,9 @@ function createClientServerFactory(deps: ServerFactoryDeps): () => Server {
           logger: deps.logger,
           config: deps.config,
           upstreamTransport: deps.upstreamTransport,
+          persistence: deps.persistence,
+          serverCommand: deps.serverCommand,
+          stderr: deps.stderr,
         },
         request,
         ctx.mcpReq.signal,
@@ -496,6 +582,7 @@ async function closeBridge(deps: CloseBridgeDeps): Promise<void> {
   await deps.upstream.close().catch(() => {});
   await deps.handle.close().catch(() => {});
   await deps.clientTransport.close();
+  deps.persistence.close();
 }
 
 /**
@@ -521,6 +608,8 @@ export async function startBridge(options: BridgeOptions): Promise<Bridge> {
   await connectUpstream(upstream, upstreamTransport);
   const session = captureSessionContext(upstream, { name: 'mcprelay', version: options.version });
 
+  const persistence = createPersistence(options.config);
+
   const handle = serveStdio(
     createClientServerFactory({
       session,
@@ -529,6 +618,9 @@ export async function startBridge(options: BridgeOptions): Promise<Bridge> {
       pinned,
       config: options.config,
       upstreamTransport,
+      persistence,
+      serverCommand: [options.command, ...options.args].join(' '),
+      stderr: options.stderr,
     }),
     {
       transport: clientTransport,
@@ -540,6 +632,6 @@ export async function startBridge(options: BridgeOptions): Promise<Bridge> {
 
   return {
     closed,
-    close: () => closeBridge({ upstreamTransport, upstream, handle, clientTransport }),
+    close: () => closeBridge({ upstreamTransport, upstream, handle, clientTransport, persistence }),
   };
 }

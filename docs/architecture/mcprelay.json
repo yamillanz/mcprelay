@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "mcprelay M2 — classified retry pipeline",
+    "title": "mcprelay M3 — durable DLQ capture",
     "output": "mcprelay.html",
     "quality_profile": "showcase",
     "viewBox": [
@@ -60,7 +60,7 @@
       "type": "backend",
       "label": "Bridge",
       "sublabel": "tools/call interception",
-      "tag": "correlation_id",
+      "tag": "correlation_id · session",
       "pos": [
         518,
         190
@@ -129,11 +129,11 @@
       ]
     },
     {
-      "id": "session",
-      "type": "backend",
-      "label": "Session context",
-      "sublabel": "serverInfo · capabilities · tools",
-      "tag": "in-memory",
+      "id": "persistence",
+      "type": "database",
+      "label": "DLQ + Store",
+      "sublabel": "queue.db + history.db",
+      "tag": "WAL · redaction · replay CLI",
       "pos": [
         518,
         60
@@ -151,7 +151,7 @@
       "tag": "defaults · CLI flags",
       "pos": [
         694,
-        330
+        60
       ],
       "size": [
         150,
@@ -185,7 +185,7 @@
         "retry-pipeline",
         "upstream-client",
         "upstream-transport",
-        "session",
+        "persistence",
         "config",
         "call-log"
       ],
@@ -265,11 +265,11 @@
       "to": "retry-pipeline",
       "label": "policy",
       "variant": "dashed",
-      "fromSide": "top",
-      "toSide": "bottom",
+      "fromSide": "bottom",
+      "toSide": "top",
       "labelAt": [
-        800,
-        287
+        790,
+        150
       ]
     },
     {
@@ -319,29 +319,6 @@
       ]
     },
     {
-      "id": "session-context",
-      "from": "upstream-client",
-      "to": "session",
-      "label": "capabilities · revision",
-      "variant": "dashed",
-      "fromSide": "top",
-      "toSide": "bottom",
-      "via": [
-        [
-          945,
-          150
-        ],
-        [
-          593,
-          150
-        ]
-      ],
-      "labelAt": [
-        770,
-        150
-      ]
-    },
-    {
       "id": "log",
       "from": "bridge",
       "to": "call-log",
@@ -353,6 +330,27 @@
         593,
         287
       ]
+    },
+    {
+      "id": "capture",
+      "from": "bridge",
+      "to": "persistence",
+      "label": "capture before error",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        593,
+        157
+      ]
+    },
+    {
+      "id": "config-persistence",
+      "from": "config",
+      "to": "persistence",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "right"
     }
   ]
 }

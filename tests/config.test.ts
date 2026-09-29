@@ -73,6 +73,7 @@ reliability:
       timeoutMs: 120000,
       retry: { maxAttempts: 1, backoff: 'exponential', baseMs: 250, jitter: true },
       idempotent: false,
+      captureToolErrors: false,
     });
     expect(resolveToolPolicy(config, 'create_issue')).toMatchObject({
       timeoutMs: 30000,
@@ -110,14 +111,14 @@ reliability:
 
   it('warns about unknown top-level sections and starts anyway', () => {
     const path = writeConfig(`
-queue:
-  provider: sqlite
+future_section:
+  enabled: true
 reliability:
   timeout_ms: 1000
 `);
     const config = loadConfig({ path });
     expect(config.reliability.timeoutMs).toBe(1000);
-    expect(config.warnings.join(' ')).toContain('queue');
+    expect(config.warnings.join(' ')).toContain('future_section');
   });
 
   it('fails when an explicit config path does not exist', () => {
@@ -136,5 +137,59 @@ reliability:
     const config = loadConfig({ path, overrides: { timeoutMs: 1234, maxAttempts: 7 } });
     expect(config.reliability.timeoutMs).toBe(1234);
     expect(config.reliability.retry.maxAttempts).toBe(7);
+  });
+});
+
+describe('queue, store, and redaction sections', () => {
+  it('provides safe defaults', () => {
+    const config = defaultConfig();
+    expect(config.queue).toEqual({ provider: 'sqlite', sqlite: { path: './.mcprelay/queue.db' } });
+    expect(config.store).toEqual({
+      provider: 'sqlite',
+      sqlite: { path: './.mcprelay/history.db' },
+    });
+    expect(config.redaction.patterns).toContain('api_key');
+    expect(config.redaction.patterns).toContain('credential');
+  });
+
+  it('applies file overrides', () => {
+    const path = writeConfig(`
+queue:
+  provider: sqlite
+  sqlite:
+    path: /tmp/custom-queue.db
+store:
+  provider: sqlite
+  sqlite:
+    path: /tmp/custom-store.db
+redaction:
+  patterns: [my_secret, api_key]
+`);
+    const config = loadConfig({ path });
+    expect(config.queue.sqlite.path).toBe('/tmp/custom-queue.db');
+    expect(config.store.sqlite.path).toBe('/tmp/custom-store.db');
+    expect(config.redaction.patterns).toEqual(['my_secret', 'api_key']);
+  });
+
+  it('rejects an unsupported queue provider with path and field', () => {
+    const path = writeConfig('queue:\n  provider: redis\n');
+    expect(() => loadConfig({ path })).toThrowError(/queue\.provider/);
+  });
+
+  it('rejects unknown keys inside queue', () => {
+    const path = writeConfig('queue:\n  nope: true\n');
+    expect(() => loadConfig({ path })).toThrowError(/queue\.nope/);
+  });
+
+  it('accepts capture_tool_errors and resolves it into the tool policy', () => {
+    const path = writeConfig(`
+reliability:
+  per_tool:
+    flaky:
+      capture_tool_errors: true
+`);
+    const config = loadConfig({ path });
+    expect(resolveToolPolicy(config, 'flaky').captureToolErrors).toBe(true);
+    expect(resolveToolPolicy(config, 'echo').captureToolErrors).toBe(false);
   });
 });

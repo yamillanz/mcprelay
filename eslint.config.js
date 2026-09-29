@@ -10,6 +10,8 @@ export default [
     rules: {
       // TypeScript already resolves identifiers; eslint's core rule lacks Node globals.
       'no-undef': 'off',
+      // Underscore-prefixed parameters are intentionally unused (interface placeholders).
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
     },
   },
 ];
