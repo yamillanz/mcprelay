@@ -9,7 +9,7 @@ Operating rules for AI agents working in this repository. Applies to humans too.
 **mcprelay** — the reliability layer for MCP tool calls. A transparent, local-first middleware that wraps any stdio MCP server and adds policy, observability, and a **dead-letter queue with replay** around `tools/call`. The DLQ+replay path (retry → capture → replay) is the core differentiator — do not let it become a footnote.
 
 - **Product truth:** [`docs/PRD.md`](docs/PRD.md) (v0.6). Everything else derives from it.
-- **Status (update this line at each milestone):** M3 `dlq-sqlite` landed 2026-09-29 — durable redacted capture before the error (QueueProvider + SQLite, ADR-0004), Store audit, `replay list|inspect`, `validate`, `capture_tool_errors` opt-in, diagram updated. npm: `@yamillanz/mcprelay` (bare `mcprelay` blocked by npm name-similarity with `mcp-relay`; scoped fallback per PRD §11; CLI command stays `mcprelay`). Next milestone: **M4 `replay-cli`** (PRD §12).
+- **Status (update this line at each milestone):** M4 `replay-cli` landed 2026-09-29 — replay as redrive for side effects (`run`/`--dry-run`, redacted result capture, ADR-0005), idempotency guard with `--force`, atomic claim/lease, first usable release `0.1.0`, README rewritten with the client-config quickstart. npm: `@yamillanz/mcprelay` (bare `mcprelay` blocked by npm name-similarity with `mcp-relay`; scoped fallback per PRD §11; CLI command stays `mcprelay`). Next milestone: **M5 `policy-engine`** (PRD §12).
 - **Method:** spec-driven via OpenSpec — every milestone is one change; specs precede code.
 - **Acceptance spine:** the §1 60-second demo (wrap → deny → fail → DLQ → replay → report). Every milestone advances exactly one demo beat.
 

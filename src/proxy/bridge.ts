@@ -24,7 +24,9 @@ import {
   type FailureRecord,
 } from '../queue/failure-record.js';
 import { createPersistence, type Persistence } from '../queue/providers.js';
+import { quoteCommandLine } from '../replay/command-line.js';
 import { classifyAttempt, type AttemptOutcome, type FailurePhase } from '../pipeline/classify.js';
+import { extractIdempotencyKey } from '../pipeline/idempotency.js';
 import { runWithRetry } from '../pipeline/retry.js';
 import { createSessionContext, recordToolInventory, type SessionContext } from './session.js';
 import { ClientTransport, UpstreamTransport, type ClientTransportOptions } from './transports.js';
@@ -404,6 +406,11 @@ async function interceptToolCall(
 ): Promise<CallToolResult> {
   const startedAt = Date.now();
   const tool = request.params.name;
+  const rawArguments = request.params.arguments;
+  const idempotencyKey = extractIdempotencyKey({
+    _meta: (request.params as { _meta?: unknown })._meta,
+    arguments: rawArguments,
+  });
   const policy = resolveToolPolicy(deps.config, tool);
   const { correlationId, progressToken, params, trace } = prepareCallMetadata(request.params);
   const requestBytes = byteLength(params);
@@ -451,11 +458,26 @@ async function interceptToolCall(
       await captureFailure(deps, {
         tool,
         correlationId,
-        rawArguments: request.params.arguments,
+        rawArguments,
         failureClass: 'tool_error',
         message: 'isError result',
         attempts: result.attempts,
       });
+    }
+    if (!isError && idempotencyKey !== undefined) {
+      try {
+        await deps.persistence.getQueue().recordExecution({
+          key: idempotencyKey,
+          toolName: tool,
+          argumentsHash: hashArguments(rawArguments),
+          executedAt: new Date().toISOString(),
+          source: 'live',
+        });
+      } catch (error) {
+        deps.stderr(
+          `mcprelay: idempotency index write failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
     }
     deps.logger.log(
       buildCallLogEntry({
@@ -489,7 +511,7 @@ async function interceptToolCall(
     await captureFailure(deps, {
       tool,
       correlationId,
-      rawArguments: request.params.arguments,
+      rawArguments,
       failureClass: recordClass,
       message,
       attempts: result.attempts,
@@ -619,7 +641,7 @@ export async function startBridge(options: BridgeOptions): Promise<Bridge> {
       config: options.config,
       upstreamTransport,
       persistence,
-      serverCommand: [options.command, ...options.args].join(' '),
+      serverCommand: quoteCommandLine(options.command, options.args),
       stderr: options.stderr,
     }),
     {

@@ -6,6 +6,7 @@ export interface RawSession {
   sendLine(line: string): void;
   nextMessage(timeoutMs?: number): Promise<unknown>;
   nextLine(timeoutMs?: number): Promise<string>;
+  stdout(): string;
   stderr(): string;
   waitForExit(timeoutMs?: number): Promise<number | null>;
   close(): void;
@@ -35,12 +36,14 @@ export function startRaw(
   const lines: string[] = [];
   const pending: Pending[] = [];
   let stdoutBuffer = '';
+  let stdoutText = '';
   let stderrText = '';
   let exitCode: number | null = null;
   const exitWaiters: Array<(code: number | null) => void> = [];
 
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => {
+    stdoutText += chunk;
     stdoutBuffer += chunk;
     let index: number;
     while ((index = stdoutBuffer.indexOf('\n')) >= 0) {
@@ -98,6 +101,9 @@ export function startRaw(
     },
     async nextMessage(timeoutMs = 5000): Promise<unknown> {
       return JSON.parse(await takeLine(timeoutMs));
+    },
+    stdout(): string {
+      return stdoutText;
     },
     stderr(): string {
       return stderrText;

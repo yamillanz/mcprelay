@@ -28,9 +28,14 @@ export interface ToolOverride {
   captureToolErrors?: boolean;
 }
 
+export interface ReplayConfig {
+  dedupWindowMs: number;
+}
+
 export interface ReliabilityConfig {
   timeoutMs: number;
   retry: RetryConfig;
+  replay: ReplayConfig;
   idempotentDefault: boolean;
   perTool: Record<string, ToolOverride>;
 }
@@ -70,8 +75,15 @@ export interface ToolPolicy {
 }
 
 const DEFAULT_CONFIG_PATH = 'mcprelay.config.yaml';
-const RELIABILITY_KEYS = new Set(['timeout_ms', 'idempotent_default', 'retry', 'per_tool']);
+const RELIABILITY_KEYS = new Set([
+  'timeout_ms',
+  'idempotent_default',
+  'retry',
+  'replay',
+  'per_tool',
+]);
 const RETRY_KEYS = new Set(['max_attempts', 'backoff', 'base_ms', 'jitter']);
+const REPLAY_KEYS = new Set(['dedup_window']);
 const PER_TOOL_KEYS = new Set([
   'timeout_ms',
   'idempotent',
@@ -88,6 +100,7 @@ export function defaultConfig(): McprelayConfig {
     reliability: {
       timeoutMs: 30000,
       retry: { maxAttempts: 3, backoff: 'exponential', baseMs: 250, jitter: true },
+      replay: { dedupWindowMs: 24 * 60 * 60 * 1000 },
       idempotentDefault: false,
       perTool: {},
     },
@@ -196,6 +209,45 @@ function applyPerTool(target: Record<string, ToolOverride>, raw: unknown, label:
   }
 }
 
+/** Parses `30m`, `24h`, `7d`, `90s`, `500ms` into milliseconds. */
+function parseDuration(text: string, label: string): number {
+  const match = /^(\d+)(ms|s|m|h|d)$/.exec(text);
+  if (match === null) {
+    throw new ConfigError(
+      `${label}: expected a duration like '30m' or '24h', got ${JSON.stringify(text)}`,
+    );
+  }
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const factor =
+    unit === 'ms'
+      ? 1
+      : unit === 's'
+        ? 1000
+        : unit === 'm'
+          ? 60_000
+          : unit === 'h'
+            ? 3_600_000
+            : 86_400_000;
+  return amount * factor;
+}
+
+function applyReplay(config: McprelayConfig, raw: unknown, label: string): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
+  assertKnownKeys(raw, REPLAY_KEYS, label);
+  if ('dedup_window' in raw) {
+    if (typeof raw.dedup_window !== 'string') {
+      throw new ConfigError(
+        `${label}.dedup_window: expected a duration string, got ${JSON.stringify(raw.dedup_window)}`,
+      );
+    }
+    config.reliability.replay.dedupWindowMs = parseDuration(
+      raw.dedup_window,
+      `${label}.dedup_window`,
+    );
+  }
+}
+
 function applyReliability(config: McprelayConfig, raw: unknown, path: string): void {
   if (!isRecord(raw)) throw new ConfigError(`${path}: reliability: expected a mapping`);
   assertKnownKeys(raw, RELIABILITY_KEYS, `${path}: reliability`);
@@ -215,6 +267,9 @@ function applyReliability(config: McprelayConfig, raw: unknown, path: string): v
   }
   if ('retry' in raw) {
     parseRetryFields(raw.retry, `${path}: reliability.retry`, config.reliability.retry);
+  }
+  if ('replay' in raw) {
+    applyReplay(config, raw.replay, `${path}: reliability.replay`);
   }
   if ('per_tool' in raw) {
     applyPerTool(config.reliability.perTool, raw.per_tool, `${path}: reliability.per_tool`);

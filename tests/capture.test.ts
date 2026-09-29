@@ -225,3 +225,46 @@ describe('DLQ capture', () => {
     expect(records[0]?.tool.name).toBe('flaky');
   });
 });
+
+describe('keyed-success idempotency index', () => {
+  it('indexes a successful call that carries an idempotency key', async () => {
+    const dir = workdir();
+    const raw = proxy(dir, `reliability:\n  retry:\n    max_attempts: 1\n`);
+    await handshake(raw);
+
+    const response = await callTool(raw, 10, 'echo', { idempotency_key: 'op-1', value: 1 });
+    expect(response.error).toBeUndefined();
+
+    const provider = queueOf(dir);
+    expect(await provider.lastExecution('op-1')).toMatchObject({
+      toolName: 'echo',
+      source: 'live',
+    });
+  });
+
+  it('reads _meta.idempotencyKey too', async () => {
+    const dir = workdir();
+    const raw = proxy(dir, `reliability:\n  retry:\n    max_attempts: 1\n`);
+    await handshake(raw);
+
+    raw.send({
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'tools/call',
+      params: { name: 'echo', arguments: { value: 1 }, _meta: { idempotencyKey: 'meta-1' } },
+    });
+    await raw.nextMessage();
+
+    expect(await queueOf(dir).lastExecution('meta-1')).toMatchObject({ toolName: 'echo' });
+  });
+
+  it('does not index unkeyed successes', async () => {
+    const dir = workdir();
+    const raw = proxy(dir, `reliability:\n  retry:\n    max_attempts: 1\n`);
+    await handshake(raw);
+
+    await callTool(raw, 10, 'echo', { value: 1 });
+
+    expect(await queueOf(dir).lastExecutionByHash(hashArguments({ value: 1 }))).toBeNull();
+  });
+});

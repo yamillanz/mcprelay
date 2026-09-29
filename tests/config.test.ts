@@ -193,3 +193,24 @@ reliability:
     expect(resolveToolPolicy(config, 'echo').captureToolErrors).toBe(false);
   });
 });
+
+describe('replay dedup window', () => {
+  it('defaults to 24 hours', () => {
+    expect(defaultConfig().reliability.replay.dedupWindowMs).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('parses duration strings', () => {
+    const path = writeConfig('reliability:\n  replay:\n    dedup_window: 30m\n');
+    expect(loadConfig({ path }).reliability.replay.dedupWindowMs).toBe(30 * 60 * 1000);
+  });
+
+  it('rejects an invalid duration with path and field', () => {
+    const path = writeConfig('reliability:\n  replay:\n    dedup_window: soon\n');
+    expect(() => loadConfig({ path })).toThrowError(/reliability\.replay\.dedup_window/);
+  });
+
+  it('rejects unknown keys inside replay', () => {
+    const path = writeConfig('reliability:\n  replay:\n    window: 1h\n');
+    expect(() => loadConfig({ path })).toThrowError(/reliability\.replay\.window/);
+  });
+});

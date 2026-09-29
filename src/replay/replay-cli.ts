@@ -2,6 +2,7 @@ import { loadConfig } from '../config/config.js';
 import { EXIT_FAILURE, EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
 import type { FailureFilter, FailureRecord, ReplayStatus } from '../queue/failure-record.js';
 import { SqliteQueueProvider } from '../queue/sqlite-queue.js';
+import { runReplayRecord, type ReplayRunOptions } from './replay-run.js';
 
 export interface ReplayIO {
   stdout(text: string): void;
@@ -9,7 +10,10 @@ export interface ReplayIO {
 }
 
 const REPLAY_USAGE =
-  'Usage: mcprelay replay <list|inspect> [--config <path>] [--json] [--status <s>] [--tool <name>] [--correlation-id <id>] [--since <iso>] [--until <iso>] [--limit <n>]';
+  'Usage: mcprelay replay <list|inspect|run> [options]\n' +
+  '  list:    [--config <path>] [--json] [--status <s>] [--tool <name>] [--correlation-id <id>] [--since <iso>] [--until <iso>] [--limit <n>]\n' +
+  '  inspect: <id> [--config <path>] [--json]\n' +
+  '  run:     <id> [--dry-run] [--force] [--set key=value]… [--config <path>] [--json]';
 
 const REPLAY_STATUSES: readonly ReplayStatus[] = ['pending', 'replayed', 'discarded'];
 
@@ -123,6 +127,67 @@ function formatRecordDetail(record: FailureRecord): string {
   ].join('\n');
 }
 
+type ParsedRun = { ok: true; options: ReplayRunOptions } | { ok: false; message: string };
+
+function parseRunTokens(tokens: readonly string[]): ParsedRun {
+  const options: ReplayRunOptions = {
+    id: '',
+    dryRun: false,
+    force: false,
+    overrides: {},
+    json: false,
+  };
+  let index = 0;
+
+  while (index < tokens.length) {
+    const token = tokens[index] as string;
+    switch (token) {
+      case '--config': {
+        const value = tokens[index + 1];
+        if (value === undefined) return { ok: false, message: "Missing value for '--config'." };
+        options.configPath = value;
+        index += 2;
+        break;
+      }
+      case '--set': {
+        const value = tokens[index + 1];
+        if (value === undefined) return { ok: false, message: "Missing value for '--set'." };
+        const separator = value.indexOf('=');
+        if (separator <= 0)
+          return { ok: false, message: `Invalid --set '${value}'; expected key=value.` };
+        options.overrides[value.slice(0, separator)] = value.slice(separator + 1);
+        index += 2;
+        break;
+      }
+      case '--dry-run':
+        options.dryRun = true;
+        index += 1;
+        break;
+      case '--force':
+        options.force = true;
+        index += 1;
+        break;
+      case '--json':
+        options.json = true;
+        index += 1;
+        break;
+      default: {
+        if (!token.startsWith('-') && options.id === '') {
+          options.id = token;
+          index += 1;
+          break;
+        }
+        return { ok: false, message: `Unknown option '${token}'.` };
+      }
+    }
+  }
+
+  if (options.id === '') {
+    return { ok: false, message: 'Missing record id. Usage: mcprelay replay run <id>' };
+  }
+  return { ok: true, options };
+}
+
 function usageError(io: ReplayIO, message: string): number {
   io.stderr(`${message}\n${REPLAY_USAGE}\n`);
   return EXIT_USAGE;
@@ -143,6 +208,11 @@ function openQueue(path: string, io: ReplayIO): SqliteQueueProvider | undefined 
 /** `mcprelay replay list|inspect`: reads the same queue DB the middleware writes. */
 export async function runReplay(tokens: readonly string[], io: ReplayIO): Promise<number> {
   const subcommand = tokens[0];
+  if (subcommand === 'run') {
+    const parsed = parseRunTokens(tokens.slice(1));
+    if (!parsed.ok) return usageError(io, parsed.message);
+    return runReplayRecord(parsed.options, io);
+  }
   if (subcommand !== 'list' && subcommand !== 'inspect') {
     return usageError(
       io,

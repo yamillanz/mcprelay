@@ -1,9 +1,9 @@
 import type { McprelayConfig } from '../config/config.js';
 import { SqliteStore, type Store } from '../store/sqlite-store.js';
-import { SqliteQueueProvider, type QueueProvider } from './sqlite-queue.js';
+import { SqliteQueueProvider, type IdempotencyIndex, type QueueProvider } from './sqlite-queue.js';
 
 export interface Persistence {
-  getQueue(): QueueProvider;
+  getQueue(): QueueProvider & IdempotencyIndex;
   getStore(): Store;
   close(): void;
 }

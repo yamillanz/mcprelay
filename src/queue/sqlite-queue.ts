@@ -4,6 +4,8 @@ import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 
 import type {
+  ExecutionEntry,
+  ExecutionRecord,
   FailureFilter,
   FailureRecord,
   HealthStatus,
@@ -24,12 +26,28 @@ export class RecordNotFoundError extends Error {
   }
 }
 
+/** Idempotency index over the queue database (used by replay dedup). */
+export interface IdempotencyIndex {
+  recordExecution(entry: ExecutionEntry): Promise<void>;
+  lastExecution(key: string): Promise<ExecutionRecord | null>;
+  lastExecutionByHash(argumentsHash: string): Promise<ExecutionRecord | null>;
+}
+
+export class AlreadyClaimedError extends Error {
+  constructor(id: string) {
+    super(`failure record '${id}' is already claimed by another replay`);
+    this.name = 'AlreadyClaimedError';
+  }
+}
+
 /** DLQ + replay substrate (PRD §6.2). */
 export interface QueueProvider {
   enqueue(record: FailureRecord): Promise<string>;
   list(filter?: FailureFilter): Promise<FailureRecord[]>;
   get(id: string): Promise<FailureRecord | null>;
   resolve(id: string, outcome: ReplayOutcome): Promise<void>;
+  claim(id: string, leaseMs: number): Promise<void>;
+  release(id: string): Promise<void>;
   purge(filter?: FailureFilter): Promise<number>;
   health(): Promise<HealthStatus>;
 }
@@ -61,6 +79,14 @@ CREATE INDEX IF NOT EXISTS failures_tool ON failures(tool_name);
 CREATE INDEX IF NOT EXISTS failures_correlation ON failures(correlation_id);
 CREATE INDEX IF NOT EXISTS failures_captured_at ON failures(captured_at);
 CREATE INDEX IF NOT EXISTS failures_replay_status ON failures(replay_status);
+CREATE TABLE IF NOT EXISTS executions (
+  key TEXT PRIMARY KEY,
+  tool_name TEXT NOT NULL,
+  arguments_hash TEXT NOT NULL,
+  executed_at TEXT NOT NULL,
+  source TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS executions_hash ON executions(arguments_hash);
 `;
 
 interface FailureRow {
@@ -111,6 +137,30 @@ function buildWhere(filter: FailureFilter): { clause: string; params: unknown[] 
   };
 }
 
+/** Adds a column when an older database predates it (in-place migration). */
+function ensureColumn(db: Database.Database, table: string, column: string, ddl: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((entry) => entry.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
+function toExecutionRecord(row: {
+  key: string;
+  tool_name: string;
+  arguments_hash: string;
+  executed_at: string;
+  source: string;
+}): ExecutionRecord {
+  return {
+    key: row.key,
+    toolName: row.tool_name,
+    argumentsHash: row.arguments_hash,
+    executedAt: row.executed_at,
+    source: row.source as ExecutionRecord['source'],
+  };
+}
+
 function toRecord(row: FailureRow): FailureRecord {
   return {
     id: row.id,
@@ -137,7 +187,7 @@ function toRecord(row: FailureRow): FailureRecord {
 }
 
 /** Durable DLQ backed by SQLite: WAL + busy_timeout, shared with the replay CLI. */
-export class SqliteQueueProvider implements QueueProvider {
+export class SqliteQueueProvider implements QueueProvider, IdempotencyIndex {
   private readonly db: Database.Database;
   private readonly path: string;
 
@@ -145,11 +195,14 @@ export class SqliteQueueProvider implements QueueProvider {
     this.path = options.path;
     mkdirSync(dirname(this.path), { recursive: true });
     this.db = new Database(this.path);
-    this.db.pragma('journal_mode = WAL');
+    // busy_timeout first: the WAL pragma needs a lock and must wait, not fail.
     this.db.pragma('busy_timeout = 5000');
+    this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA);
+    ensureColumn(this.db, 'failures', 'claimed_at', 'claimed_at TEXT');
+    ensureColumn(this.db, 'failures', 'claim_expires_at', 'claim_expires_at TEXT');
   }
 
   async enqueue(record: FailureRecord): Promise<string> {
@@ -217,6 +270,83 @@ export class SqliteQueueProvider implements QueueProvider {
       if (exists === undefined) throw new RecordNotFoundError(id);
       throw new AlreadyResolvedError(id);
     }
+  }
+
+  async claim(id: string, leaseMs: number): Promise<void> {
+    const now = new Date();
+    const info = this.db
+      .prepare(
+        `UPDATE failures
+         SET claimed_at = ?, claim_expires_at = ?
+         WHERE id = ? AND replay_status = 'pending'
+           AND (claim_expires_at IS NULL OR claim_expires_at < ?)`,
+      )
+      .run(
+        now.toISOString(),
+        new Date(now.getTime() + leaseMs).toISOString(),
+        id,
+        now.toISOString(),
+      );
+    if (info.changes === 0) {
+      const row = this.db.prepare('SELECT replay_status FROM failures WHERE id = ?').get(id) as
+        { replay_status: string } | undefined;
+      if (row === undefined) throw new RecordNotFoundError(id);
+      if (row.replay_status !== 'pending') throw new AlreadyResolvedError(id);
+      throw new AlreadyClaimedError(id);
+    }
+  }
+
+  async release(id: string): Promise<void> {
+    this.db
+      .prepare(
+        `UPDATE failures SET claimed_at = NULL, claim_expires_at = NULL
+         WHERE id = ? AND replay_status = 'pending'`,
+      )
+      .run(id);
+  }
+
+  async recordExecution(entry: ExecutionEntry): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO executions (key, tool_name, arguments_hash, executed_at, source)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           tool_name = excluded.tool_name,
+           arguments_hash = excluded.arguments_hash,
+           executed_at = excluded.executed_at,
+           source = excluded.source`,
+      )
+      .run(entry.key, entry.toolName, entry.argumentsHash, entry.executedAt, entry.source);
+  }
+
+  async lastExecution(key: string): Promise<ExecutionRecord | null> {
+    const row = this.db.prepare('SELECT * FROM executions WHERE key = ?').get(key) as
+      | {
+          key: string;
+          tool_name: string;
+          arguments_hash: string;
+          executed_at: string;
+          source: string;
+        }
+      | undefined;
+    return row === undefined ? null : toExecutionRecord(row);
+  }
+
+  async lastExecutionByHash(argumentsHash: string): Promise<ExecutionRecord | null> {
+    const row = this.db
+      .prepare(
+        'SELECT * FROM executions WHERE arguments_hash = ? ORDER BY executed_at DESC LIMIT 1',
+      )
+      .get(argumentsHash) as
+      | {
+          key: string;
+          tool_name: string;
+          arguments_hash: string;
+          executed_at: string;
+          source: string;
+        }
+      | undefined;
+    return row === undefined ? null : toExecutionRecord(row);
   }
 
   async purge(filter: FailureFilter = {}): Promise<number> {

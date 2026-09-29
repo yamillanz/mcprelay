@@ -27,7 +27,7 @@ Appendix A specifies a ULID: lexicographically sortable by capture time and uniq
 
 ### D4 — Schema and pragmas
 
-One table per concern (queue `failures`, store `audit`), separate database files by default (`./.mcprelay/queue.db`, `./.mcprelay/history.db`). Pragmas on open: `journal_mode = WAL`, `busy_timeout = 5000`, `synchronous = NORMAL`, `foreign_keys = ON`. WAL + busy_timeout make concurrent middleware/CLI access safe (NFR-9); NORMAL keeps committed records across process crashes (the NFR-5 guarantee) without an fsync per capture. Indexes on `tool_name`, `correlation_id`, `captured_at`, `replay_status` support the CLI filters.
+One table per concern (queue `failures`, store `audit`), separate database files by default (`./.mcprelay/queue.db`, `./.mcprelay/history.db`). Pragmas on open: `busy_timeout = 5000` **first**, then `journal_mode = WAL`, `synchronous = NORMAL`, `foreign_keys = ON`. The order matters: the WAL pragma needs a lock and must wait for it instead of failing with `SQLITE_BUSY` — found by the concurrent-replay test in M4 and fixed in both adapters. WAL + busy_timeout make concurrent middleware/CLI access safe (NFR-9); NORMAL keeps committed records across process crashes (the NFR-5 guarantee) without an fsync per capture. Indexes on `tool_name`, `correlation_id`, `captured_at`, `replay_status` support the CLI filters.
 
 ### D5 — Atomic resolve via a guarded UPDATE
 

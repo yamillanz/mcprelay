@@ -111,8 +111,9 @@ export class SqliteStore implements Store {
     this.path = options.path;
     mkdirSync(dirname(this.path), { recursive: true });
     this.db = new Database(this.path);
-    this.db.pragma('journal_mode = WAL');
+    // busy_timeout first: the WAL pragma needs a lock and must wait, not fail.
     this.db.pragma('busy_timeout = 5000');
+    this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.exec(SCHEMA);
   }

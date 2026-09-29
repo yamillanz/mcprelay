@@ -66,3 +66,14 @@ export function failureClassFromD4(d4: FailureClass): RecordFailureClass | undef
       return undefined;
   }
 }
+
+/** Idempotency index entry: one successful execution per key (latest wins). */
+export interface ExecutionEntry {
+  key: string;
+  toolName: string;
+  argumentsHash: string;
+  executedAt: string;
+  source: 'live' | 'replay';
+}
+
+export type ExecutionRecord = ExecutionEntry;

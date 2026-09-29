@@ -1,10 +1,14 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { AlreadyResolvedError, SqliteQueueProvider } from '../src/queue/sqlite-queue.js';
+import {
+  AlreadyClaimedError,
+  AlreadyResolvedError,
+  SqliteQueueProvider,
+} from '../src/queue/sqlite-queue.js';
 import { newFailureRecordId, type FailureRecord } from '../src/queue/failure-record.js';
 
 const providers: SqliteQueueProvider[] = [];
@@ -141,5 +145,135 @@ describe('QueueProvider contract', () => {
     );
     const { provider } = open(path);
     expect(await provider.health()).toMatchObject({ ok: true, path });
+  });
+});
+
+describe('claim, release, and the idempotency index', () => {
+  it('claims atomically: exactly one concurrent claimer wins', async () => {
+    const first = open();
+    const second = open(first.path);
+    const original = record();
+    await first.provider.enqueue(original);
+
+    const results = await Promise.allSettled([
+      first.provider.claim(original.id, 60_000),
+      second.provider.claim(original.id, 60_000),
+    ]);
+
+    expect(results.filter((r) => r.status === 'fulfilled').length).toBe(1);
+    expect(
+      (results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason,
+    ).toBeInstanceOf(AlreadyClaimedError);
+  });
+
+  it('reclaims an expired lease and releases a claim', async () => {
+    const { provider } = open();
+    const original = record();
+    await provider.enqueue(original);
+
+    await provider.claim(original.id, 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(provider.claim(original.id, 60_000)).resolves.toBeUndefined();
+
+    await provider.release(original.id);
+    await expect(provider.claim(original.id, 60_000)).resolves.toBeUndefined();
+  });
+
+  it('records and reads executions by key and by hash', async () => {
+    const { provider } = open();
+
+    await provider.recordExecution({
+      key: 'key-1',
+      toolName: 'create_issue',
+      argumentsHash: 'h'.repeat(64),
+      executedAt: '2026-09-29T10:00:00.000Z',
+      source: 'live',
+    });
+    await provider.recordExecution({
+      key: 'key-2',
+      toolName: 'create_issue',
+      argumentsHash: 'h'.repeat(64),
+      executedAt: '2026-09-29T11:00:00.000Z',
+      source: 'replay',
+    });
+
+    expect(await provider.lastExecution('key-1')).toMatchObject({
+      key: 'key-1',
+      toolName: 'create_issue',
+      source: 'live',
+    });
+    expect(await provider.lastExecution('missing')).toBeNull();
+    expect(await provider.lastExecutionByHash('h'.repeat(64))).toMatchObject({ key: 'key-2' });
+  });
+
+  it('upserts an execution so the latest wins', async () => {
+    const { provider } = open();
+    await provider.recordExecution({
+      key: 'k',
+      toolName: 't',
+      argumentsHash: 'a'.repeat(64),
+      executedAt: '2026-09-29T10:00:00.000Z',
+      source: 'live',
+    });
+    await provider.recordExecution({
+      key: 'k',
+      toolName: 't',
+      argumentsHash: 'a'.repeat(64),
+      executedAt: '2026-09-29T12:00:00.000Z',
+      source: 'replay',
+    });
+    expect((await provider.lastExecution('k'))?.executedAt).toBe('2026-09-29T12:00:00.000Z');
+  });
+
+  it('migrates an existing M3 database in place', async () => {
+    const path = queuePath();
+    mkdirSync(dirname(path), { recursive: true });
+    const legacy = new Database(path, {});
+    legacy.exec(`
+      CREATE TABLE failures (
+        id TEXT PRIMARY KEY, correlation_id TEXT NOT NULL, captured_at TEXT NOT NULL,
+        caller_type TEXT NOT NULL, caller_identity TEXT NOT NULL,
+        server_name TEXT NOT NULL, server_command TEXT NOT NULL,
+        tool_name TEXT NOT NULL, arguments_hash TEXT NOT NULL, arguments TEXT NOT NULL,
+        failure_class TEXT NOT NULL, failure_message TEXT NOT NULL, failure_attempts INTEGER NOT NULL,
+        replay_status TEXT NOT NULL DEFAULT 'pending', replay_attempts TEXT NOT NULL DEFAULT '[]',
+        last_outcome TEXT, resolved_at TEXT
+      );
+    `);
+    const original = record();
+    legacy
+      .prepare(
+        `INSERT INTO failures (id, correlation_id, captured_at, caller_type, caller_identity, server_name, server_command, tool_name, arguments_hash, arguments, failure_class, failure_message, failure_attempts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        original.id,
+        original.correlation_id,
+        original.captured_at,
+        'stdio',
+        'local',
+        'echo-server',
+        'node echo.js',
+        'echo',
+        'a'.repeat(64),
+        '{}',
+        'upstream_error',
+        'boom',
+        1,
+      );
+    legacy.close();
+
+    const { provider } = open(path);
+    const columns = (
+      provider as unknown as {
+        db: { prepare: (sql: string) => { all: () => Array<{ name: string }> } };
+      }
+    ).db
+      .prepare('PRAGMA table_info(failures)')
+      .all()
+      .map((column) => column.name);
+    expect(columns).toContain('claimed_at');
+    expect(columns).toContain('claim_expires_at');
+    expect(await provider.get(original.id)).toMatchObject({ id: original.id });
+    await expect(provider.claim(original.id, 1000)).resolves.toBeUndefined();
   });
 });

@@ -2,24 +2,101 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M3 — durable DLQ capture.** `mcprelay run -- <server command…>` wraps any stdio MCP server, applies a per-call timeout with classified retries, and captures failed calls into a **dead-letter queue** — durably, redacted, before the client sees the error — where `mcprelay replay list|inspect` can examine them. Policy and replay execution land in later milestones — see [`docs/PRD.md`](docs/PRD.md) §12. Published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare `mcprelay` name is blocked by npm's name-similarity policy; the scoped fallback from PRD §11 applied). The first real release lands at M4.
+> **Status: M4 — first usable release (`0.1.0`).** Wrap any stdio server, pass the session through semantically unchanged, apply per-call timeouts and classified retries, capture failed calls into a durable, redacted dead-letter queue, and **replay them as redrive for side effects** — with an idempotency guard against duplicates. Policy and per-tool metrics land in later milestones ([`docs/PRD.md`](docs/PRD.md) §12).
+>
+> Published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare `mcprelay` name is blocked by npm's name-similarity policy; scoped fallback per PRD §11 — the installed command is still `mcprelay`).
+
+## Quickstart (client config)
+
+Point your MCP client at `mcprelay` instead of the server — one line, no server changes. Claude Desktop / Cursor (`claude_desktop_config.json` / `mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@yamillanz/mcprelay",
+        "run",
+        "--",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/path/to/project"
+      ]
+    }
+  }
+}
+```
+
+OpenCode (`opencode.json`):
+
+```json
+{
+  "mcp": {
+    "filesystem": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@yamillanz/mcprelay",
+        "run",
+        "--",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/path/to/project"
+      ]
+    }
+  }
+}
+```
+
+Or from a terminal:
+
+```sh
+npx @yamillanz/mcprelay run -- npx @modelcontextprotocol/server-filesystem .
+```
+
+Requires Node.js ≥ 20.19.
 
 ## What works today
 
-- **Wrap any stdio server** 1:1: `mcprelay run -- <server command…>` (also `mcprelay -- <server command…>`).
-- **Protocol fidelity**: everything except `tools/call` passes through semantically unchanged — `tools/list`, `resources/*`, `prompts/*`, `completion/*`, `logging/setLevel`, server→client requests (`sampling/createMessage`, `elicitation/create`, `roots/list`), progress, custom methods, and JSON-RPC batch frames.
-- **Timeout + classified retries**: each call has a configurable timeout; transient failures retry with exponential backoff, gated by the D4 taxonomy — timeouts and upstream errors retry only for tools marked `idempotent: true`, `isError` results never retry, protocol errors never retry, and client cancellation aborts without retrying.
-- **Interception**: `tools/call` gets a generated correlation id (OTel `_meta` keys preserved), latency and payload sizes, and one JSON log line on stderr per call with the real attempt count.
-- **Dead-letter queue**: a call that exhausts its retries (or fails non-retryably) is written to SQLite **before** the error is returned, with redacted arguments, a sha256 hash of the raw arguments, failure class, attempts, and correlation id; records survive restarts.
-- **Inspection**: `mcprelay replay list [filters] [--json]` and `mcprelay replay inspect <id>` read the same database the middleware writes.
-- **Validation**: `mcprelay validate` checks the configuration and reports precise path + field errors.
-- **Process hygiene**: upstream stderr goes to stderr; an upstream crash surfaces as a standard JSON-RPC error and exit code `3`.
+- **Wrap any stdio server 1:1** — `mcprelay run -- <server command…>` (also `mcprelay -- <server command…>`). The upstream runs unmodified and unaware.
+- **Protocol fidelity** — everything except `tools/call` passes through semantically unchanged: `tools/list`, `resources/*`, `prompts/*`, `completion/*`, `logging/setLevel`, server→client requests (`sampling/createMessage`, `elicitation/create`, `roots/list`), progress, custom methods, and JSON-RPC batch frames.
+- **Timeout + classified retries** — per-call timeout; transient failures retry with exponential backoff, gated by the failure-class taxonomy: timeouts and upstream errors retry only for tools marked `idempotent: true`; `isError` and protocol errors never retry; client cancellation aborts without retrying.
+- **Dead-letter queue** — a call that ultimately fails is written to SQLite **before** the client sees the error, with redacted arguments, a sha256 hash of the raw arguments, failure class, attempts, and correlation id. Records survive restarts.
+- **Replay as redrive** — `mcprelay replay run <id>` re-executes the stored call, and the replay's own (redacted) result or error is captured into the audit trail. `--dry-run` inspects with zero upstream `tools/call`.
+- **Duplicate guard** — successful keyed calls are indexed; replay refuses a duplicate within `reliability.replay.dedup_window` unless `--force` is given.
+- **Structured logs** — one JSON line per intercepted call on stderr with correlation id, latency, payload sizes, attempts, and decision.
 
-Exit codes: `0` success, `1` command failed (record not found, database error), `2` usage or configuration error, `3` upstream failure.
+## What replay means
+
+A replayed call's response cannot go back to the agent that made it — that session is over. Replay is **redrive for side effects**: the call runs upstream, the side effect lands, and the (redacted) result or error is stored in the audit trail, which is the only place a replay's outcome can be inspected. Read-only tools are rarely worth replaying; mark them `effects: read` and `--dry-run` will say so.
+
+Because secrets are never stored in the clear, replay refuses to run a record whose arguments contain `[REDACTED]` values. Supply them explicitly:
+
+```sh
+mcprelay replay run <id> --set api_key=…      # then the call runs with the real value
+```
+
+## Dead-letter queue
+
+```sh
+mcprelay replay list                          # captured failures (all statuses)
+mcprelay replay list --status pending --json  # filters + machine-readable
+mcprelay replay inspect <id>                  # full record (redacted arguments)
+mcprelay replay run <id> --dry-run            # tool present? duplicate risk? zero side effects
+mcprelay replay run <id>                      # re-execute; result captured in the audit trail
+mcprelay replay run <id> --force              # allow a duplicate within the dedup window
+```
+
+The `replay` CLI and the middleware share the SQLite files (WAL + busy_timeout) and never start a server unless a replay actually runs.
 
 ## Configuration
 
-`./mcprelay.config.yaml` (or `--config <path>`) configures reliability; with no file, safe defaults apply (timeout 30 s, retries on, tools non-idempotent):
+`./mcprelay.config.yaml` (or `--config <path>`); with no file, safe defaults apply:
 
 ```yaml
 reliability:
@@ -29,12 +106,13 @@ reliability:
     backoff: exponential
     base_ms: 250
     jitter: true
+  replay:
+    dedup_window: 24h # duplicate side-effect window for replay
   per_tool:
     slow_tool: { timeout_ms: 120000, retry: { max_attempts: 1 } }
-    create_issue: { idempotent: true } # timed-out calls retry only for idempotent tools
-```
+    create_issue: { idempotent: true, capture_tool_errors: true }
+    flaky_search: { effects: read }
 
-```yaml
 queue:
   provider: sqlite
   sqlite: { path: ./.mcprelay/queue.db }
@@ -43,70 +121,30 @@ store:
   sqlite: { path: ./.mcprelay/history.db }
 redaction:
   patterns: [api_key, token, password, authorization, secret, credential]
-reliability:
-  per_tool:
-    create_issue: { idempotent: true, capture_tool_errors: true } # isError results land in the DLQ too
 ```
 
-CLI flags override file values: `--timeout-ms <ms>`, `--max-attempts <n>`. A malformed known section aborts startup with the config path and field; unknown top-level sections only warn.
+CLI flags override file values: `--timeout-ms <ms>`, `--max-attempts <n>`. `mcprelay validate` checks the whole config and reports precise path + field errors. Malformed known sections abort startup; unknown top-level sections only warn.
 
-## Inspecting the dead-letter queue
+**Exit codes:** `0` success · `1` command failed (record not found, refused, database error) · `2` usage or configuration error · `3` upstream failure.
 
-```sh
-mcprelay replay list                      # all captured failures
-mcprelay replay list --status pending --json
-mcprelay replay inspect <id>              # full record, redacted arguments
-```
+**Install note:** `better-sqlite3` downloads a native binary via an install script. If your npm uses `ignore-scripts=true`, run `npm rebuild better-sqlite3 --ignore-scripts=false` once.
 
-The `replay` CLI and the middleware share the SQLite files (WAL + busy_timeout); `mcprelay replay` never starts an upstream server.
+## `tools/list` is never filtered
 
-> **Install note:** `better-sqlite3` downloads a native binary via an install script. If your npm is configured with `ignore-scripts=true`, run `npm rebuild better-sqlite3 --ignore-scripts=false` once after installing.
-
-## Try it
-
-Requires Node.js ≥ 20.19.
-
-```sh
-npx @yamillanz/mcprelay run -- npx @modelcontextprotocol/server-filesystem .
-```
-
-The command installed is still `mcprelay` (the npm package is scoped). Or run it from a clone:
-
-```sh
-npm install
-npm run build
-
-node dist/cli/index.js run -- npx @modelcontextprotocol/server-filesystem .
-```
-
-A call through the proxy logs one line on stderr:
-
-```json
-{
-  "timestamp": "2026-09-25T19:29:27.566Z",
-  "correlation_id": "03022cd0-…",
-  "caller": { "type": "stdio", "identity": "local" },
-  "server": "secure-filesystem-server",
-  "tool": "read_file",
-  "decision": "allowed",
-  "latency_ms": 3,
-  "request_bytes": 166,
-  "response_bytes": 2544,
-  "attempt": 1
-}
-```
+Denied tools still appear in `tools/list` (nothing is hidden), and denial happens at call time — an invisible behavior change is worse than a visible error. Policy itself lands in M5.
 
 ## Development
 
 ```sh
-npm test              # vitest (CLI, proxy fidelity matrix, call logs)
+npm install
+npm test              # vitest: CLI, proxy fidelity, retry taxonomy, DLQ, replay
 npm run typecheck
 npm run lint
 npm run format:check
 npm run build
 ```
 
-Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/).
+Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
 
 ## License
 

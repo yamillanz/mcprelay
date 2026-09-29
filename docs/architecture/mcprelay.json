@@ -2,11 +2,11 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "mcprelay M3 — durable DLQ capture",
+    "title": "mcprelay M4 — replay as redrive for side effects",
     "output": "mcprelay.html",
     "quality_profile": "showcase",
     "viewBox": [
-      1040,
+      1080,
       540
     ]
   },
@@ -75,7 +75,7 @@
       "type": "backend",
       "label": "Retry pipeline",
       "sublabel": "D4 classify · backoff · bounds",
-      "tag": "timeout 30s",
+      "tag": "timeout · config-driven",
       "pos": [
         694,
         190
@@ -133,24 +133,9 @@
       "type": "database",
       "label": "DLQ + Store",
       "sublabel": "queue.db + history.db",
-      "tag": "WAL · redaction · replay CLI",
+      "tag": "WAL · redaction · replay list/inspect",
       "pos": [
         518,
-        60
-      ],
-      "size": [
-        150,
-        64
-      ]
-    },
-    {
-      "id": "config",
-      "type": "backend",
-      "label": "Config",
-      "sublabel": "mcprelay.config.yaml",
-      "tag": "defaults · CLI flags",
-      "pos": [
-        694,
         60
       ],
       "size": [
@@ -172,6 +157,21 @@
         150,
         64
       ]
+    },
+    {
+      "id": "replay-cli",
+      "type": "backend",
+      "label": "Replay CLI",
+      "sublabel": "run · --dry-run · --force",
+      "tag": "claim · dedup",
+      "pos": [
+        694,
+        60
+      ],
+      "size": [
+        150,
+        64
+      ]
     }
   ],
   "boundaries": [
@@ -186,8 +186,8 @@
         "upstream-client",
         "upstream-transport",
         "persistence",
-        "config",
-        "call-log"
+        "call-log",
+        "replay-cli"
       ],
       "pad": 12
     },
@@ -195,7 +195,8 @@
       "kind": "region",
       "label": "upstream process",
       "wraps": [
-        "server"
+        "server",
+        "replay-cli"
       ],
       "pad": 12
     }
@@ -257,19 +258,6 @@
       "labelAt": [
         945,
         415
-      ]
-    },
-    {
-      "id": "config-policy",
-      "from": "config",
-      "to": "retry-pipeline",
-      "label": "policy",
-      "variant": "dashed",
-      "fromSide": "bottom",
-      "toSide": "top",
-      "labelAt": [
-        790,
-        150
       ]
     },
     {
@@ -345,8 +333,8 @@
       ]
     },
     {
-      "id": "config-persistence",
-      "from": "config",
+      "id": "replay-queue",
+      "from": "replay-cli",
       "to": "persistence",
       "variant": "dashed",
       "fromSide": "left",
