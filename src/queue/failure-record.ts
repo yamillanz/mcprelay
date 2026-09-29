@@ -1,4 +1,4 @@
-import { ulid } from 'ulid';
+import { monotonicFactory } from 'ulid';
 
 import type { FailureClass } from '../pipeline/classify.js';
 
@@ -41,8 +41,11 @@ export interface HealthStatus {
   path?: string;
 }
 
+const monotonicUlid = monotonicFactory();
+
+/** Monotonic ULID: unique and lexicographically increasing within a millisecond. */
 export function newFailureRecordId(): string {
-  return ulid();
+  return monotonicUlid();
 }
 
 /** Maps a D4 classification to the persisted class; undefined = never captured. */

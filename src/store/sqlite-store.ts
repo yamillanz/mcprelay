@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import Database from 'better-sqlite3';
-import { ulid } from 'ulid';
+import { monotonicFactory } from 'ulid';
 
 /** Call history, metrics, and audit substrate (PRD §6.2). */
 export interface Store {
@@ -75,6 +75,8 @@ CREATE INDEX IF NOT EXISTS audit_correlation ON audit(correlation_id);
 CREATE INDEX IF NOT EXISTS audit_failure ON audit(failure_id);
 `;
 
+const monotonicUlid = monotonicFactory();
+
 const NOT_IMPLEMENTED =
   'recordCall/metrics land with the metrics change (M8); the audit path is implemented now';
 
@@ -130,7 +132,7 @@ export class SqliteStore implements Store {
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        ulid(),
+        monotonicUlid(),
         new Date().toISOString(),
         entry.kind,
         entry.correlationId ?? null,

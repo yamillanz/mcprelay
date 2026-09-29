@@ -19,7 +19,7 @@ Synchronous, mature, and the only binding whose engines cover the PRD's Node ≥
 
 ### D2 — ULID for record ids: `ulid@^3` (MIT)
 
-Appendix A specifies a ULID: lexicographically sortable by capture time and unique without coordination. Rejected hand-rolling Crockford base32 (correctness risk for ~30 lines of code) and UUIDv4 (`crypto.randomUUID`, not sortable).
+Appendix A specifies a ULID: lexicographically sortable by capture time and unique without coordination. Rejected hand-rolling Crockford base32 (correctness risk for ~30 lines of code) and UUIDv4 (`crypto.randomUUID`, not sortable). The generator MUST be **monotonic** (`monotonicFactory`): two records captured in the same millisecond must stay ordered, because `replay list` orders by `id DESC`. A plain `ulid()` draws fresh randomness per call and violated the spec's sortable-id scenario within a millisecond; the suite caught it in CI (Node 20) and it was fixed in the M3 follow-up commit.
 
 ### D3 — Capture ordering and the failure trade-off
 
