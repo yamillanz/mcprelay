@@ -2,7 +2,7 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M4 — first usable release (`0.1.0`).** Wrap any stdio server, pass the session through semantically unchanged, apply per-call timeouts and classified retries, capture failed calls into a durable, redacted dead-letter queue, and **replay them as redrive for side effects** — with an idempotency guard against duplicates. Policy and per-tool metrics land in later milestones ([`docs/PRD.md`](docs/PRD.md) §12).
+> **Status: M5 — policy engine.** Wrap any stdio server, pass the session through semantically unchanged, apply per-call timeouts and classified retries, enforce declarative allow/deny policy (with dry-run), capture failed calls into a durable, redacted dead-letter queue, and **replay them as redrive for side effects** — with an idempotency guard against duplicates. Per-tool metrics land in a later milestone ([`docs/PRD.md`](docs/PRD.md) §12).
 >
 > Published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare `mcprelay` name is blocked by npm's name-similarity policy; scoped fallback per PRD §11 — the installed command is still `mcprelay`).
 
@@ -65,6 +65,7 @@ Requires Node.js ≥ 20.19.
 
 - **Wrap any stdio server 1:1** — `mcprelay run -- <server command…>` (also `mcprelay -- <server command…>`). The upstream runs unmodified and unaware.
 - **Protocol fidelity** — everything except `tools/call` passes through semantically unchanged: `tools/list`, `resources/*`, `prompts/*`, `completion/*`, `logging/setLevel`, server→client requests (`sampling/createMessage`, `elicitation/create`, `roots/list`), progress, custom methods, and JSON-RPC batch frames.
+- **Policy without surprises** — declarative allow/deny by tool (globs), caller identity, and argument matchers (`equals`, `in`, `prefix`, `regex`, `max_length`, numeric bounds), with most-specific-wins precedence. Denied calls get a standard MCP error (`-32001`), an audit entry, and a log line — and are never forwarded upstream or written to the DLQ. `tools/list` is never filtered. `--policy-dry-run` reports decisions without enforcing; `mcprelay policy test` evaluates a call (or a stored failure) before you enforce anything.
 - **Timeout + classified retries** — per-call timeout; transient failures retry with exponential backoff, gated by the failure-class taxonomy: timeouts and upstream errors retry only for tools marked `idempotent: true`; `isError` and protocol errors never retry; client cancellation aborts without retrying.
 - **Dead-letter queue** — a call that ultimately fails is written to SQLite **before** the client sees the error, with redacted arguments, a sha256 hash of the raw arguments, failure class, attempts, and correlation id. Records survive restarts.
 - **Replay as redrive** — `mcprelay replay run <id>` re-executes the stored call, and the replay's own (redacted) result or error is captured into the audit trail. `--dry-run` inspects with zero upstream `tools/call`.
@@ -93,6 +94,35 @@ mcprelay replay run <id> --force              # allow a duplicate within the ded
 ```
 
 The `replay` CLI and the middleware share the SQLite files (WAL + busy_timeout) and never start a server unless a replay actually runs.
+
+## Policy
+
+Policy is declarative YAML, evaluated before the retry pipeline. The **most specific matching rule wins** — exact tool name beats a glob, plus one point each for a `caller` and for every argument matcher; ties go to the first rule in the file:
+
+```yaml
+policy:
+  default: allow
+  rules:
+    - { tool: 'fs/delete_*', action: deny }
+    - tool: read_file
+      args: { path: { prefix: /projects } }
+      action: allow
+    - tool: deploy
+      caller: ci-bot
+      action: deny
+```
+
+Argument matchers: `equals`, `in`, `prefix`, `regex`, `max_length`, and numeric `min`/`max`, addressed by dot path (`config.timeout`, `items.0.name`); a missing argument never matches. Regex patterns are length-capped and reject nested quantifiers (ReDoS-bounded), and matched input is capped at 4096 characters.
+
+Inspect before enforcing:
+
+```sh
+mcprelay policy test --tool read_file --args '{"path":"/etc/passwd"}'  # decision + matched rule
+mcprelay policy test --id <failure-id> --json                          # a stored call, machine-readable
+mcprelay run --policy-dry-run -- <server command…>                     # log would-be denials, enforce nothing
+```
+
+A denied call returns a JSON-RPC error (`-32001`) to the client, writes a `denied` audit entry, and logs `decision: denied` with zero attempts — and is never forwarded upstream or captured in the DLQ (a denial is not a failure). With no `policy` section every tool is allowed and a startup warning says so.
 
 ## Configuration
 
@@ -123,7 +153,7 @@ redaction:
   patterns: [api_key, token, password, authorization, secret, credential]
 ```
 
-CLI flags override file values: `--timeout-ms <ms>`, `--max-attempts <n>`. `mcprelay validate` checks the whole config and reports precise path + field errors. Malformed known sections abort startup; unknown top-level sections only warn.
+CLI flags override file values: `--timeout-ms <ms>`, `--max-attempts <n>`, `--policy-dry-run`. `mcprelay validate` checks the whole config and reports precise path + field errors. Malformed known sections abort startup; unknown top-level sections only warn.
 
 **Exit codes:** `0` success · `1` command failed (record not found, refused, database error) · `2` usage or configuration error · `3` upstream failure.
 
@@ -131,7 +161,7 @@ CLI flags override file values: `--timeout-ms <ms>`, `--max-attempts <n>`. `mcpr
 
 ## `tools/list` is never filtered
 
-Denied tools still appear in `tools/list` (nothing is hidden), and denial happens at call time — an invisible behavior change is worse than a visible error. Policy itself lands in M5.
+Denied tools still appear in `tools/list` (nothing is hidden), and denial happens at call time with a visible error. Hiding tools would be an invisible behavior change — and it would break capability discovery for tools the agent may legitimately use with other arguments. This is deliberate and stays that way unless a future opt-in says otherwise.
 
 ## Development
 
@@ -144,7 +174,7 @@ npm run format:check
 npm run build
 ```
 
-Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
+Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics, 0006 policy engine); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
 
 ## License
 

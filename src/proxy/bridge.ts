@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/client';
 import {
   Server,
+  ProtocolError,
   SdkError,
   SdkErrorCode,
   serializeMessage,
@@ -17,6 +18,7 @@ import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server
 
 import type { CallLogEntry, CallLogger } from '../observability/call-log.js';
 import { resolveToolPolicy, type McprelayConfig } from '../config/config.js';
+import { evaluateCall, type PolicyDecision } from '../policy/policy.js';
 import { hashArguments, redactMessage, redactValue } from '../redaction/redact.js';
 import {
   failureClassFromD4,
@@ -87,12 +89,13 @@ interface CallLogFields {
   trace: TraceFields;
   tool: string;
   serverName: string;
-  decision: 'allowed' | 'failed' | 'cancelled';
+  decision: 'allowed' | 'denied' | 'failed' | 'cancelled';
   startedAt: number;
   requestBytes: number;
   responseBytes: number;
   attempt: number;
   error?: { message: string; code?: number };
+  enforced?: boolean;
 }
 
 type RelayRequest = (
@@ -337,6 +340,7 @@ function buildCallLogEntry(fields: CallLogFields): CallLogEntry {
     response_bytes: fields.responseBytes,
     attempt: fields.attempt,
     ...(fields.error === undefined ? {} : { error: fields.error }),
+    ...(fields.enforced === undefined ? {} : { enforced: fields.enforced }),
   };
 }
 
@@ -361,6 +365,9 @@ interface CaptureInput {
   message: string;
   attempts: number;
 }
+
+/** Server-defined JSON-RPC code for an enforced policy denial (ADR-0006). */
+const POLICY_DENIED_CODE = -32001;
 
 /** Durable, redacted capture; never blocks the client if persistence fails. */
 async function captureFailure(deps: InterceptionDeps, input: CaptureInput): Promise<void> {
@@ -399,6 +406,28 @@ async function captureFailure(deps: InterceptionDeps, input: CaptureInput): Prom
   }
 }
 
+interface DenialInput {
+  tool: string;
+  correlationId: string;
+  decision: PolicyDecision;
+}
+
+/** Audit entry for an enforced denial; a store failure never blocks the denial. */
+async function recordDenial(deps: InterceptionDeps, input: DenialInput): Promise<void> {
+  try {
+    await deps.persistence.getStore().audit({
+      kind: 'denied',
+      correlationId: input.correlationId,
+      toolName: input.tool,
+      detail: { action: 'deny', rule: input.decision.rule, reason: input.decision.reason },
+    });
+  } catch (error) {
+    deps.stderr(
+      `mcprelay: denial audit failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
 async function interceptToolCall(
   deps: InterceptionDeps,
   request: { params: { name: string } & Record<string, unknown> },
@@ -414,6 +443,51 @@ async function interceptToolCall(
   const policy = resolveToolPolicy(deps.config, tool);
   const { correlationId, progressToken, params, trace } = prepareCallMetadata(request.params);
   const requestBytes = byteLength(params);
+
+  const logBase = {
+    correlationId,
+    trace,
+    tool,
+    serverName: deps.session.server.name,
+    startedAt,
+    requestBytes,
+  };
+
+  // Policy runs before the retry pipeline: a denial consumes no retries,
+  // claims no DLQ record, and never reaches the upstream (FR-Y4).
+  const decision = evaluateCall(deps.config.policy, {
+    tool,
+    arguments: rawArguments,
+    caller: 'local',
+  });
+  if (decision.action === 'deny') {
+    const message = `policy denied tool '${tool}': ${decision.reason}`;
+    if (deps.config.policyDryRun) {
+      deps.stderr(`mcprelay: policy dry-run: would deny tool '${tool}' (${decision.reason})\n`);
+      deps.logger.log(
+        buildCallLogEntry({
+          ...logBase,
+          decision: 'denied',
+          responseBytes: 0,
+          attempt: 0,
+          error: { message },
+          enforced: false,
+        }),
+      );
+    } else {
+      deps.logger.log(
+        buildCallLogEntry({
+          ...logBase,
+          decision: 'denied',
+          responseBytes: 0,
+          attempt: 0,
+          error: { message },
+        }),
+      );
+      await recordDenial(deps, { tool, correlationId, decision });
+      throw new ProtocolError(POLICY_DENIED_CODE, message);
+    }
+  }
 
   const result = await runWithRetry({
     attempt: async (): Promise<AttemptOutcome> => {
@@ -441,15 +515,6 @@ async function interceptToolCall(
       jitter: policy.retry.jitter,
     },
   });
-
-  const logBase = {
-    correlationId,
-    trace,
-    tool,
-    serverName: deps.session.server.name,
-    startedAt,
-    requestBytes,
-  };
 
   if (result.outcome.kind === 'result') {
     const value = result.outcome.result;

@@ -17,6 +17,8 @@ export interface CallLogEntry {
   response_bytes: number;
   attempt: number;
   error?: { message: string; code?: number };
+  /** Present (false) only when a dry-run decision was reported, never enforced. */
+  enforced?: boolean;
 }
 
 /** Writes one structured JSON line per intercepted call (FR-O1) to the sink. */

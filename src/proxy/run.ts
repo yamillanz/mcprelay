@@ -12,6 +12,7 @@ export interface ProxyOptions {
   configPath?: string;
   timeoutMs?: number;
   maxAttempts?: number;
+  policyDryRun?: boolean;
 }
 
 /**
@@ -32,6 +33,7 @@ export async function runProxy(
       overrides: {
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
+        ...(options.policyDryRun === undefined ? {} : { policyDryRun: options.policyDryRun }),
       },
     });
   } catch (error) {

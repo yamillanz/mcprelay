@@ -1,5 +1,6 @@
 import { EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
 import { loadConfig } from '../config/config.js';
+import { runPolicy } from '../policy/policy-cli.js';
 import { runProxy } from '../proxy/run.js';
 import { runReplay } from '../replay/replay-cli.js';
 import { packageVersion } from '../version.js';
@@ -21,6 +22,7 @@ Commands:
   run        Wrap a stdio MCP server: mcprelay run [options] -- <server command…>
              (also: mcprelay [options] -- <server command…>)
   replay     Inspect the dead-letter queue: replay list | replay inspect <id>
+  policy     Inspect policy decisions: policy test [--tool X --args JSON | --id <id>]
   validate   Check the configuration and report precise errors
   version    Print the mcprelay version
   help       Show this help
@@ -29,6 +31,7 @@ Run options:
   --config <path>       Config file (default ./mcprelay.config.yaml)
   --timeout-ms <ms>     Per-call timeout; overrides the config file
   --max-attempts <n>    Retry bound; overrides the config file
+  --policy-dry-run      Report policy decisions without enforcing them
 
 Options:
   -h, --help      Show this help
@@ -40,8 +43,8 @@ Exit codes:
   2  usage or configuration error
   3  upstream failure (the wrapped server exited unexpectedly)
 
-Status: M3 — durable DLQ capture, redaction, and replay inspection. Policy
-and replay execution land in later milestones — see docs/PRD.md §12.
+Status: M5 — declarative policy (allow/deny by tool, caller, and arguments;
+dry-run and denial audit). HTTP transport lands next — see docs/PRD.md §12.
 `;
 
 interface RunInvocation {
@@ -50,6 +53,7 @@ interface RunInvocation {
   configPath?: string;
   timeoutMs?: number;
   maxAttempts?: number;
+  policyDryRun?: boolean;
 }
 
 type ParsedRun = { ok: true; invocation: RunInvocation } | { ok: false; message: string };
@@ -60,11 +64,17 @@ function parseRunInvocation(tokens: readonly string[]): ParsedRun {
   let configPath: string | undefined;
   let timeoutMs: number | undefined;
   let maxAttempts: number | undefined;
+  let policyDryRun: boolean | undefined;
   let index = 0;
 
   while (index < tokens.length) {
     const token = tokens[index];
     if (token === undefined || token === '--') break;
+    if (token === '--policy-dry-run') {
+      policyDryRun = true;
+      index += 1;
+      continue;
+    }
     if (token === '--config' || token === '--timeout-ms' || token === '--max-attempts') {
       const value = tokens[index + 1];
       if (value === undefined) return { ok: false, message: `Missing value for '${token}'.` };
@@ -96,6 +106,7 @@ function parseRunInvocation(tokens: readonly string[]): ParsedRun {
       ...(configPath === undefined ? {} : { configPath }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
       ...(maxAttempts === undefined ? {} : { maxAttempts }),
+      ...(policyDryRun === undefined ? {} : { policyDryRun }),
     },
   };
 }
@@ -134,11 +145,12 @@ async function runValidate(tokens: readonly string[], io: CliIO): Promise<number
 async function runWith(tokens: readonly string[], io: CliIO): Promise<number> {
   const parsed = parseRunInvocation(tokens);
   if (!parsed.ok) return usageError(io, parsed.message);
-  const { command, args, configPath, timeoutMs, maxAttempts } = parsed.invocation;
+  const { command, args, configPath, timeoutMs, maxAttempts, policyDryRun } = parsed.invocation;
   return runProxy(command, args, io, {
     ...(configPath === undefined ? {} : { configPath }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(maxAttempts === undefined ? {} : { maxAttempts }),
+    ...(policyDryRun === undefined ? {} : { policyDryRun }),
   });
 }
 
@@ -171,12 +183,17 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
     return runReplay(rest, io);
   }
 
+  if (command === 'policy') {
+    return runPolicy(rest, io);
+  }
+
   if (
     command === 'run' ||
     command === '--' ||
     command === '--config' ||
     command === '--timeout-ms' ||
-    command === '--max-attempts'
+    command === '--max-attempts' ||
+    command === '--policy-dry-run'
   ) {
     return runWith(command === 'run' ? rest : argv, io);
   }

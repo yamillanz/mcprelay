@@ -26,7 +26,7 @@ describe('mcprelay validate', () => {
     const raw = run(['validate']);
     expect(await raw.nextLine()).toContain('config ok');
     expect(await raw.waitForExit()).toBe(0);
-    expect(raw.stderr()).toBe('');
+    expect(raw.stderr()).toContain('no policy rules');
   });
 
   it('accepts a valid config and does not touch the databases', async () => {

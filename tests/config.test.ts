@@ -32,7 +32,7 @@ describe('configuration defaults', () => {
   it('starts with defaults when no file exists', () => {
     const config = loadConfig({ cwd: tempDir() });
     expect(config.reliability.timeoutMs).toBe(30000);
-    expect(config.warnings).toEqual([]);
+    expect(config.warnings.join(' ')).toContain('no policy rules');
   });
 });
 
@@ -191,6 +191,67 @@ reliability:
     const config = loadConfig({ path });
     expect(resolveToolPolicy(config, 'flaky').captureToolErrors).toBe(true);
     expect(resolveToolPolicy(config, 'echo').captureToolErrors).toBe(false);
+  });
+});
+
+describe('policy section', () => {
+  it('provides an allow-all default and warns when no rules are configured', () => {
+    const config = loadConfig({ cwd: tempDir() });
+    expect(config.policy.default).toBe('allow');
+    expect(config.policy.rules).toEqual([]);
+    expect(config.warnings.join(' ')).toMatch(/no policy rules/);
+  });
+
+  it('parses rules in order with compiled matchers', () => {
+    const path = writeConfig(`
+policy:
+  default: deny
+  rules:
+    - tool: fs/read_file
+      args:
+        path:
+          prefix: /projects
+      action: allow
+    - tool: "fs/delete_*"
+      action: deny
+`);
+    const config = loadConfig({ path });
+    expect(config.policy.default).toBe('deny');
+    expect(config.policy.rules).toHaveLength(2);
+    expect(config.policy.rules[0]?.tool).toBe('fs/read_file');
+    expect(config.policy.rules[0]?.specificity).toBe(3);
+    expect(config.policy.rules[1]?.toolRegex.test('fs/delete_all')).toBe(true);
+    expect(config.warnings).toEqual([]);
+  });
+
+  it('rejects a malformed rule with path and field', () => {
+    const path = writeConfig(`
+policy:
+  rules:
+    - tool: read_file
+      args:
+        path:
+          regex: "(a+)+$"
+      action: allow
+`);
+    expect(() => loadConfig({ path })).toThrowError(ConfigError);
+    try {
+      loadConfig({ path });
+    } catch (error) {
+      expect((error as Error).message).toContain('policy.rules[0].args.path.regex');
+    }
+  });
+
+  it('rejects unknown keys inside policy', () => {
+    const path = writeConfig('policy:\n  rules: []\n  mode: strict\n');
+    expect(() => loadConfig({ path })).toThrowError(/policy\.mode/);
+  });
+
+  it('accepts the dry-run override', () => {
+    expect(loadConfig({ cwd: tempDir(), overrides: { policyDryRun: true } }).policyDryRun).toBe(
+      true,
+    );
+    expect(defaultConfig().policyDryRun).toBe(false);
   });
 });
 

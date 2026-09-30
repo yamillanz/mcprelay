@@ -2,11 +2,11 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "mcprelay M4 — replay as redrive for side effects",
+    "title": "mcprelay M5 — policy gate before the retry pipeline",
     "output": "mcprelay.html",
     "quality_profile": "showcase",
     "viewBox": [
-      1080,
+      1226,
       540
     ]
   },
@@ -44,7 +44,7 @@
       "id": "serve-stdio",
       "type": "backend",
       "label": "serveStdio (SDK Server)",
-      "sublabel": "client-facing MCP termination",
+      "sublabel": "client-facing termination",
       "tag": "era: 2025 / 2026-07-28",
       "pos": [
         342,
@@ -71,13 +71,28 @@
       ]
     },
     {
+      "id": "policy-engine",
+      "type": "security",
+      "label": "Policy engine",
+      "sublabel": "tool · caller · args rules",
+      "tag": "deny → audit · no DLQ",
+      "pos": [
+        694,
+        190
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
       "id": "retry-pipeline",
       "type": "backend",
       "label": "Retry pipeline",
-      "sublabel": "D4 classify · backoff · bounds",
+      "sublabel": "classify · backoff · bounds",
       "tag": "timeout · config-driven",
       "pos": [
-        694,
+        870,
         190
       ],
       "size": [
@@ -92,7 +107,7 @@
       "sublabel": "upstream MCP termination",
       "tag": "server/discover probe",
       "pos": [
-        870,
+        1046,
         190
       ],
       "size": [
@@ -106,7 +121,7 @@
       "label": "UpstreamTransport",
       "sublabel": "spawn + newline JSON-RPC",
       "pos": [
-        870,
+        1046,
         330
       ],
       "size": [
@@ -118,9 +133,9 @@
       "id": "server",
       "type": "external",
       "label": "Wrapped MCP Server",
-      "sublabel": "any stdio server, unmodified",
+      "sublabel": "any stdio server",
       "pos": [
-        870,
+        1046,
         450
       ],
       "size": [
@@ -133,9 +148,9 @@
       "type": "database",
       "label": "DLQ + Store",
       "sublabel": "queue.db + history.db",
-      "tag": "WAL · redaction · replay list/inspect",
+      "tag": "WAL · redaction · replay",
       "pos": [
-        518,
+        694,
         60
       ],
       "size": [
@@ -147,10 +162,10 @@
       "id": "call-log",
       "type": "database",
       "label": "Call log",
-      "sublabel": "one JSON line per tools/call",
+      "sublabel": "JSON line per tools/call",
       "tag": "stderr",
       "pos": [
-        518,
+        694,
         330
       ],
       "size": [
@@ -165,7 +180,7 @@
       "sublabel": "run · --dry-run · --force",
       "tag": "claim · dedup",
       "pos": [
-        694,
+        870,
         60
       ],
       "size": [
@@ -182,6 +197,7 @@
         "client-transport",
         "serve-stdio",
         "bridge",
+        "policy-engine",
         "retry-pipeline",
         "upstream-client",
         "upstream-transport",
@@ -230,13 +246,24 @@
       ]
     },
     {
-      "id": "attempts",
+      "id": "evaluate",
       "from": "bridge",
-      "to": "retry-pipeline",
-      "label": "attempts",
+      "to": "policy-engine",
+      "label": "evaluate",
       "variant": "emphasis",
       "labelAt": [
         681,
+        168
+      ]
+    },
+    {
+      "id": "policy-allow",
+      "from": "policy-engine",
+      "to": "retry-pipeline",
+      "label": "allowed",
+      "variant": "emphasis",
+      "labelAt": [
+        857,
         168
       ]
     },
@@ -256,7 +283,7 @@
       "to": "server",
       "variant": "emphasis",
       "labelAt": [
-        945,
+        1121,
         415
       ]
     },
@@ -274,12 +301,12 @@
           425
         ],
         [
-          945,
+          1121,
           425
         ]
       ],
       "labelAt": [
-        595,
+        683,
         425
       ]
     },
@@ -293,7 +320,7 @@
       "toSide": "top",
       "via": [
         [
-          945,
+          1121,
           30
         ],
         [
@@ -302,21 +329,34 @@
         ]
       ],
       "labelAt": [
-        680,
+        760,
         30
       ]
     },
     {
+      "id": "deny-audit",
+      "from": "policy-engine",
+      "to": "persistence",
+      "label": "denied audit",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        769,
+        157
+      ]
+    },
+    {
       "id": "log",
-      "from": "bridge",
+      "from": "policy-engine",
       "to": "call-log",
-      "label": "allowed / failed / cancelled",
+      "label": "decision log",
       "variant": "dashed",
       "fromSide": "bottom",
       "toSide": "top",
       "labelAt": [
-        593,
-        287
+        769,
+        292
       ]
     },
     {
@@ -326,10 +366,16 @@
       "label": "capture before error",
       "variant": "emphasis",
       "fromSide": "top",
-      "toSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          593,
+          92
+        ]
+      ],
       "labelAt": [
         593,
-        157
+        140
       ]
     },
     {

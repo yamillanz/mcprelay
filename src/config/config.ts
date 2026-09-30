@@ -4,6 +4,12 @@ import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 import { DEFAULT_REDACTION_PATTERNS } from '../redaction/redact.js';
+import {
+  PolicyError,
+  defaultPolicyConfig,
+  parsePolicyConfig,
+  type PolicyConfig,
+} from '../policy/policy.js';
 
 /** Configuration error: message always names the config path and the field. */
 export class ConfigError extends Error {
@@ -59,12 +65,16 @@ export interface McprelayConfig {
   queue: QueueConfig;
   store: StoreConfig;
   redaction: RedactionConfig;
+  policy: PolicyConfig;
+  /** Runtime-only (CLI flag): evaluate policy but do not enforce. */
+  policyDryRun: boolean;
   warnings: string[];
 }
 
 export interface ConfigOverrides {
   timeoutMs?: number;
   maxAttempts?: number;
+  policyDryRun?: boolean;
 }
 
 export interface ToolPolicy {
@@ -107,6 +117,8 @@ export function defaultConfig(): McprelayConfig {
     queue: { provider: 'sqlite', sqlite: { path: './.mcprelay/queue.db' } },
     store: { provider: 'sqlite', sqlite: { path: './.mcprelay/history.db' } },
     redaction: { patterns: [...DEFAULT_REDACTION_PATTERNS] },
+    policy: defaultPolicyConfig(),
+    policyDryRun: false,
     warnings: [],
   };
 }
@@ -312,7 +324,7 @@ function parseConfigDocument(text: string, path: string): Record<string, unknown
   return raw;
 }
 
-const TOP_LEVEL_KEYS = new Set(['reliability', 'queue', 'store', 'redaction']);
+const TOP_LEVEL_KEYS = new Set(['reliability', 'queue', 'store', 'redaction', 'policy']);
 
 function applySqliteSection(
   target: { provider: 'sqlite'; sqlite: { path: string } },
@@ -360,6 +372,15 @@ function applyRedaction(config: McprelayConfig, raw: unknown, label: string): vo
   }
 }
 
+function applyPolicy(config: McprelayConfig, raw: unknown, label: string): void {
+  try {
+    config.policy = parsePolicyConfig(raw, label);
+  } catch (error) {
+    if (error instanceof PolicyError) throw new ConfigError(error.message);
+    throw error;
+  }
+}
+
 function applyConfigDocument(
   config: McprelayConfig,
   document: Record<string, unknown>,
@@ -376,6 +397,7 @@ function applyConfigDocument(
   if ('queue' in document) applySqliteSection(config.queue, document.queue, `${path}: queue`);
   if ('store' in document) applySqliteSection(config.store, document.store, `${path}: store`);
   if ('redaction' in document) applyRedaction(config, document.redaction, `${path}: redaction`);
+  if ('policy' in document) applyPolicy(config, document.policy, `${path}: policy`);
 }
 
 function applyOverrides(config: McprelayConfig, overrides: ConfigOverrides | undefined): void {
@@ -383,6 +405,7 @@ function applyOverrides(config: McprelayConfig, overrides: ConfigOverrides | und
   if (overrides?.maxAttempts !== undefined) {
     config.reliability.retry.maxAttempts = overrides.maxAttempts;
   }
+  if (overrides?.policyDryRun !== undefined) config.policyDryRun = overrides.policyDryRun;
 }
 
 /**
@@ -404,5 +427,13 @@ export function loadConfig(
   }
 
   applyOverrides(config, options.overrides);
+
+  if (config.policy.rules.length === 0) {
+    config.warnings.push(
+      config.policy.default === 'deny'
+        ? 'no policy rules configured: every tools/call is denied (policy.default: deny)'
+        : 'no policy rules configured: all tools are allowed',
+    );
+  }
   return config;
 }
