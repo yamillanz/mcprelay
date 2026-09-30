@@ -55,5 +55,7 @@ Scenario → test traceability: "Characterization tests lock every case" → `te
   - 21/21 cases identical to the 1.2 baseline (exit 2 + same first stderr line)
 - [x] 5.3 Docs/diagram: none — file-local refactor alters no architecture, flow, or component; README, AGENTS status line, and PRD stay untouched (note it here)
   - Confirmed: only `src/replay/replay-cli.ts` changed (plus characterization tests); no diagram regeneration, no docs changes
-- [ ] 5.4 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-- [ ] 5.5 Human approval to archive (rule 0); archive the change after approval
+- [x] 5.4 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
+  - Approved 2026-09-30: `428b650` refactor (+ `e5a0d0a` spec) pushed to `origin/main`
+- [x] 5.5 Human approval to archive (rule 0); archive the change after approval
+  - Approved and archived 2026-09-30 as `2026-09-30-replay-cli-refactor`
