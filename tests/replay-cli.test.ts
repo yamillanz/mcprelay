@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { startRaw, type RawSession } from './helpers/raw-client.js';
+import { startRaw, waitForStderr, type RawSession } from './helpers/raw-client.js';
 import { SqliteQueueProvider } from '../src/queue/sqlite-queue.js';
 import { newFailureRecordId, type FailureRecord } from '../src/queue/failure-record.js';
 
@@ -116,5 +116,37 @@ describe('mcprelay replay database errors', () => {
     const raw = run(['replay', 'list', '--config', configPath]);
     expect(await raw.waitForExit()).toBe(1);
     expect(raw.stderr()).toContain('cannot open queue database');
+  });
+});
+
+describe('replay parser characterization', () => {
+  const cases: Array<[string, string]> = [
+    ['replay list --config', "Missing value for '--config'."],
+    ['replay list --tool', "Missing value for '--tool'."],
+    ['replay list --correlation-id', "Missing value for '--correlation-id'."],
+    ['replay list --since', "Missing value for '--since'."],
+    ['replay list --until', "Missing value for '--until'."],
+    ['replay list --status', "Missing value for '--status'."],
+    ['replay list --status bogus', "Invalid status 'bogus'."],
+    ['replay list --limit', "Invalid value for '--limit': undefined"],
+    ['replay list --limit abc', "Invalid value for '--limit': abc"],
+    ['replay list --limit 0', "Invalid value for '--limit': 0"],
+    ['replay list --bogus', "Unknown option '--bogus'."],
+    ['replay inspect', 'Missing record id. Usage: mcprelay replay inspect <id>'],
+    ['replay inspect one two', "Unknown option 'two'."],
+    ['replay inspect --json', 'Missing record id. Usage: mcprelay replay inspect <id>'],
+    ['replay run', 'Missing record id. Usage: mcprelay replay run <id>'],
+    ['replay run --set', "Missing value for '--set'."],
+    ['replay run --set nope', "Invalid --set 'nope'; expected key=value."],
+    ['replay run a b', "Unknown option 'b'."],
+    ['replay run --bogus', "Unknown option '--bogus'."],
+    ['replay run --dry-run', 'Missing record id. Usage: mcprelay replay run <id>'],
+    ['replay run --force --json', 'Missing record id. Usage: mcprelay replay run <id>'],
+  ];
+
+  it.each(cases)('rejects "%s" with exit 2 and the exact message', async (commandLine, message) => {
+    const raw = run(commandLine.split(' '));
+    await waitForStderr(raw, message);
+    expect(await raw.waitForExit()).toBe(2);
   });
 });

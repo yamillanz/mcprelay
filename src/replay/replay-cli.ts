@@ -17,6 +17,26 @@ const REPLAY_USAGE =
 
 const REPLAY_STATUSES: readonly ReplayStatus[] = ['pending', 'replayed', 'discarded'];
 
+/** One parser step: the next token index, or a precise usage error. */
+type Step = { ok: true; next: number } | { ok: false; message: string };
+
+interface OptionValue {
+  ok: true;
+  value: string;
+  next: number;
+}
+
+/** Reads the value that follows a flag; missing values share one error. */
+function readOptionValue(
+  tokens: readonly string[],
+  index: number,
+  flag: string,
+): OptionValue | { ok: false; message: string } {
+  const value = tokens[index + 1];
+  if (value === undefined) return { ok: false, message: `Missing value for '${flag}'.` };
+  return { ok: true, value, next: index + 2 };
+}
+
 interface ReplayOptions {
   configPath?: string;
   json: boolean;
@@ -26,69 +46,108 @@ interface ReplayOptions {
 
 type ParsedReplay = { ok: true; options: ReplayOptions } | { ok: false; message: string };
 
+function consumeConfigPath(
+  tokens: readonly string[],
+  index: number,
+  target: { configPath?: string },
+): Step {
+  const read = readOptionValue(tokens, index, '--config');
+  if (!read.ok) return read;
+  target.configPath = read.value;
+  return { ok: true, next: read.next };
+}
+
+function consumeJsonFlag(index: number, options: { json: boolean }): Step {
+  options.json = true;
+  return { ok: true, next: index + 1 };
+}
+
+function consumeFilterOption(
+  tokens: readonly string[],
+  index: number,
+  token: string,
+  options: ReplayOptions,
+): Step {
+  const read = readOptionValue(tokens, index, token);
+  if (!read.ok) return read;
+  if (token === '--tool') options.filter.tool = read.value;
+  if (token === '--correlation-id') options.filter.correlationId = read.value;
+  if (token === '--since') options.filter.since = read.value;
+  if (token === '--until') options.filter.until = read.value;
+  return { ok: true, next: read.next };
+}
+
+function consumeStatus(tokens: readonly string[], index: number, options: ReplayOptions): Step {
+  const read = readOptionValue(tokens, index, '--status');
+  if (!read.ok) return read;
+  if (!REPLAY_STATUSES.includes(read.value as ReplayStatus)) {
+    return { ok: false, message: `Invalid status '${read.value}'.` };
+  }
+  options.filter.status = read.value as ReplayStatus;
+  return { ok: true, next: read.next };
+}
+
+/** `--limit` reports the invalid value, not the shared missing-value error. */
+function consumeLimit(tokens: readonly string[], index: number, options: ReplayOptions): Step {
+  const read = readOptionValue(tokens, index, '--limit');
+  const raw = read.ok ? read.value : undefined;
+  const limit = raw === undefined ? Number.NaN : Number(raw);
+  if (!Number.isInteger(limit) || limit < 1) {
+    return { ok: false, message: `Invalid value for '--limit': ${String(raw)}` };
+  }
+  options.filter.limit = limit;
+  return { ok: true, next: index + 2 };
+}
+
+/** Consumes the positional record id for `inspect`; other default tokens are unknown options. */
+function consumeInspectId(
+  subcommand: string,
+  token: string,
+  index: number,
+  options: ReplayOptions,
+): Step {
+  if (subcommand === 'inspect' && options.id === undefined && !token.startsWith('-')) {
+    options.id = token;
+    return { ok: true, next: index + 1 };
+  }
+  return { ok: false, message: `Unknown option '${token}'.` };
+}
+
+function consumeReplayToken(
+  subcommand: string,
+  tokens: readonly string[],
+  index: number,
+  token: string,
+  options: ReplayOptions,
+): Step {
+  switch (token) {
+    case '--config':
+      return consumeConfigPath(tokens, index, options);
+    case '--json':
+      return consumeJsonFlag(index, options);
+    case '--tool':
+    case '--correlation-id':
+    case '--since':
+    case '--until':
+      return consumeFilterOption(tokens, index, token, options);
+    case '--status':
+      return consumeStatus(tokens, index, options);
+    case '--limit':
+      return consumeLimit(tokens, index, options);
+    default:
+      return consumeInspectId(subcommand, token, index, options);
+  }
+}
+
 function parseReplayTokens(subcommand: string, tokens: readonly string[]): ParsedReplay {
   const options: ReplayOptions = { json: false, filter: {} };
   let index = 0;
 
-  const value = (): string | undefined => tokens[index + 1];
-
   while (index < tokens.length) {
     const token = tokens[index] as string;
-    switch (token) {
-      case '--config': {
-        const configPath = value();
-        if (configPath === undefined)
-          return { ok: false, message: "Missing value for '--config'." };
-        options.configPath = configPath;
-        index += 2;
-        break;
-      }
-      case '--json':
-        options.json = true;
-        index += 1;
-        break;
-      case '--tool':
-      case '--correlation-id':
-      case '--since':
-      case '--until': {
-        const entry = value();
-        if (entry === undefined) return { ok: false, message: `Missing value for '${token}'.` };
-        if (token === '--tool') options.filter.tool = entry;
-        if (token === '--correlation-id') options.filter.correlationId = entry;
-        if (token === '--since') options.filter.since = entry;
-        if (token === '--until') options.filter.until = entry;
-        index += 2;
-        break;
-      }
-      case '--status': {
-        const status = value();
-        if (status === undefined) return { ok: false, message: "Missing value for '--status'." };
-        if (!REPLAY_STATUSES.includes(status as ReplayStatus)) {
-          return { ok: false, message: `Invalid status '${status}'.` };
-        }
-        options.filter.status = status as ReplayStatus;
-        index += 2;
-        break;
-      }
-      case '--limit': {
-        const raw = value();
-        const limit = raw === undefined ? Number.NaN : Number(raw);
-        if (!Number.isInteger(limit) || limit < 1) {
-          return { ok: false, message: `Invalid value for '--limit': ${String(raw)}` };
-        }
-        options.filter.limit = limit;
-        index += 2;
-        break;
-      }
-      default: {
-        if (subcommand === 'inspect' && options.id === undefined && !token.startsWith('-')) {
-          options.id = token;
-          index += 1;
-          break;
-        }
-        return { ok: false, message: `Unknown option '${token}'.` };
-      }
-    }
+    const step = consumeReplayToken(subcommand, tokens, index, token, options);
+    if (!step.ok) return { ok: false, message: step.message };
+    index = step.next;
   }
 
   if (subcommand === 'inspect' && options.id === undefined) {
@@ -129,6 +188,57 @@ function formatRecordDetail(record: FailureRecord): string {
 
 type ParsedRun = { ok: true; options: ReplayRunOptions } | { ok: false; message: string };
 
+function consumeSetOverride(
+  tokens: readonly string[],
+  index: number,
+  options: ReplayRunOptions,
+): Step {
+  const read = readOptionValue(tokens, index, '--set');
+  if (!read.ok) return read;
+  const separator = read.value.indexOf('=');
+  if (separator <= 0) {
+    return { ok: false, message: `Invalid --set '${read.value}'; expected key=value.` };
+  }
+  options.overrides[read.value.slice(0, separator)] = read.value.slice(separator + 1);
+  return { ok: true, next: read.next };
+}
+
+function consumeBooleanFlag(token: string, index: number, options: ReplayRunOptions): Step {
+  if (token === '--dry-run') options.dryRun = true;
+  if (token === '--force') options.force = true;
+  if (token === '--json') options.json = true;
+  return { ok: true, next: index + 1 };
+}
+
+/** Consumes the positional record id; other default tokens are unknown options. */
+function consumeRunId(token: string, index: number, options: ReplayRunOptions): Step {
+  if (!token.startsWith('-') && options.id === '') {
+    options.id = token;
+    return { ok: true, next: index + 1 };
+  }
+  return { ok: false, message: `Unknown option '${token}'.` };
+}
+
+function consumeRunToken(
+  tokens: readonly string[],
+  index: number,
+  token: string,
+  options: ReplayRunOptions,
+): Step {
+  switch (token) {
+    case '--config':
+      return consumeConfigPath(tokens, index, options);
+    case '--set':
+      return consumeSetOverride(tokens, index, options);
+    case '--dry-run':
+    case '--force':
+    case '--json':
+      return consumeBooleanFlag(token, index, options);
+    default:
+      return consumeRunId(token, index, options);
+  }
+}
+
 function parseRunTokens(tokens: readonly string[]): ParsedRun {
   const options: ReplayRunOptions = {
     id: '',
@@ -141,45 +251,9 @@ function parseRunTokens(tokens: readonly string[]): ParsedRun {
 
   while (index < tokens.length) {
     const token = tokens[index] as string;
-    switch (token) {
-      case '--config': {
-        const value = tokens[index + 1];
-        if (value === undefined) return { ok: false, message: "Missing value for '--config'." };
-        options.configPath = value;
-        index += 2;
-        break;
-      }
-      case '--set': {
-        const value = tokens[index + 1];
-        if (value === undefined) return { ok: false, message: "Missing value for '--set'." };
-        const separator = value.indexOf('=');
-        if (separator <= 0)
-          return { ok: false, message: `Invalid --set '${value}'; expected key=value.` };
-        options.overrides[value.slice(0, separator)] = value.slice(separator + 1);
-        index += 2;
-        break;
-      }
-      case '--dry-run':
-        options.dryRun = true;
-        index += 1;
-        break;
-      case '--force':
-        options.force = true;
-        index += 1;
-        break;
-      case '--json':
-        options.json = true;
-        index += 1;
-        break;
-      default: {
-        if (!token.startsWith('-') && options.id === '') {
-          options.id = token;
-          index += 1;
-          break;
-        }
-        return { ok: false, message: `Unknown option '${token}'.` };
-      }
-    }
+    const step = consumeRunToken(tokens, index, token, options);
+    if (!step.ok) return { ok: false, message: step.message };
+    index = step.next;
   }
 
   if (options.id === '') {
