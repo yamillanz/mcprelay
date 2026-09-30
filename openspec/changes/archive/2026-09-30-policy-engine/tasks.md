@@ -53,4 +53,5 @@ Test-first (rule 11): each delta scenario becomes a failing test before its impl
     - `policy test --json` → exit 0, `{decision: deny, rule: 1}`; Store audit `kind: denied`, `detail.rule: 1`
 - [x] 8.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
   - Approved 2026-09-30: `9cb9d6b` spec + `4d351b2` feat, pushed to `origin/main`
-- [ ] 8.4 Human approval to archive (rule 0); archive the change after approval
+- [x] 8.4 Human approval to archive (rule 0); archive the change after approval
+  - Approved and archived 2026-09-30 as `2026-09-30-policy-engine`
