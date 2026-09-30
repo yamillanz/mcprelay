@@ -80,6 +80,13 @@ interface GroupFrame {
   currentAlternative: string | undefined;
 }
 
+interface ScanState {
+  frames: GroupFrame[];
+  inClass: boolean;
+  /** Risk found on the group that just closed; applied when a quantifier follows. */
+  pendingGroupRisk: string | undefined;
+}
+
 function alternationIsAmbiguous(alternatives: readonly string[]): boolean {
   const seen = new Set<string>();
   for (const first of alternatives) {
@@ -90,95 +97,122 @@ function alternationIsAmbiguous(alternatives: readonly string[]): boolean {
   return false;
 }
 
+/** Records the first character of the atom that starts the current alternative. */
+function noteAtom(state: ScanState, firstCharacter: string): void {
+  const frame = state.frames.at(-1);
+  if (frame !== undefined && frame.currentAlternative === undefined) {
+    frame.currentAlternative = firstCharacter;
+  }
+}
+
+function pushAlternative(frame: GroupFrame): void {
+  frame.alternatives.push(frame.currentAlternative ?? '');
+  frame.currentAlternative = undefined;
+}
+
+function startAlternative(state: ScanState): void {
+  const frame = state.frames.at(-1);
+  if (frame !== undefined) pushAlternative(frame);
+}
+
+/** Advances past `(?` and a `(?<name>` group name; returns the last index consumed. */
+function skipGroupPrefix(pattern: string, index: number): number {
+  if (pattern[index + 1] !== '?') return index;
+  const questionIndex = index + 1;
+  if (pattern[questionIndex + 1] !== '<') return questionIndex;
+  const nameEnd = pattern.indexOf('>', questionIndex);
+  return nameEnd > questionIndex ? nameEnd : questionIndex;
+}
+
+function openGroup(state: ScanState, pattern: string, index: number): number {
+  state.frames.push({ hasQuantifier: false, alternatives: [], currentAlternative: undefined });
+  state.pendingGroupRisk = undefined;
+  return skipGroupPrefix(pattern, index);
+}
+
+function closeGroup(state: ScanState): void {
+  const frame = state.frames.pop();
+  if (frame === undefined) return;
+  pushAlternative(frame);
+  if (frame.hasQuantifier) {
+    state.pendingGroupRisk = 'nested quantifier';
+  } else if (frame.alternatives.length > 1 && alternationIsAmbiguous(frame.alternatives)) {
+    state.pendingGroupRisk = 'ambiguous alternation';
+  } else {
+    state.pendingGroupRisk = undefined;
+  }
+}
+
+/** Consumes a quantifier; returns the risk it closes when the quantified atom was risky. */
+function applyQuantifier(state: ScanState): string | undefined {
+  if (state.pendingGroupRisk !== undefined) return state.pendingGroupRisk;
+  const frame = state.frames.at(-1);
+  if (frame !== undefined) frame.hasQuantifier = true;
+  return undefined;
+}
+
 /**
  * ReDoS heuristic (FR-Y6): flags quantified groups that themselves contain a
  * quantifier (nested repetition) or an ambiguous alternation. Conservative by
  * design: some safe patterns are rejected, dangerous ones are not executed.
+ * One case per character kind; all state lives in `ScanState`.
  */
 function findRedosRisk(pattern: string): string | undefined {
-  const frames: GroupFrame[] = [];
-  let inClass = false;
-  let pendingGroupRisk: string | undefined;
-
-  const noteAtom = (first: string): void => {
-    const frame = frames.at(-1);
-    if (frame !== undefined && frame.currentAlternative === undefined) {
-      frame.currentAlternative = first;
-    }
-  };
-  const pushAlternative = (frame: GroupFrame): void => {
-    frame.alternatives.push(frame.currentAlternative ?? '');
-    frame.currentAlternative = undefined;
-  };
+  const state: ScanState = { frames: [], inClass: false, pendingGroupRisk: undefined };
 
   for (let index = 0; index < pattern.length; index += 1) {
     const character = pattern[index] as string;
 
+    // Escape and class content come first: `\` also escapes inside a class,
+    // and only an unescaped `]` closes one.
     if (character === '\\') {
-      noteAtom('*');
+      noteAtom(state, '*');
       index += 1;
-      pendingGroupRisk = undefined;
+      state.pendingGroupRisk = undefined;
       continue;
     }
-    if (inClass) {
-      if (character === ']') inClass = false;
+    if (state.inClass) {
+      if (character === ']') state.inClass = false;
       continue;
     }
-    if (character === '[') {
-      inClass = true;
-      noteAtom('*');
-      pendingGroupRisk = undefined;
-      continue;
-    }
-    if (character === '(') {
-      frames.push({ hasQuantifier: false, alternatives: [], currentAlternative: undefined });
-      if (pattern[index + 1] === '?') {
-        index += 1;
-        if (pattern[index + 1] === '<') {
-          const nameEnd = pattern.indexOf('>', index);
-          if (nameEnd > index) index = nameEnd;
+
+    switch (character) {
+      case '[':
+        state.inClass = true;
+        noteAtom(state, '*');
+        break;
+      case '(':
+        index = openGroup(state, pattern, index);
+        break;
+      case ')':
+        closeGroup(state);
+        continue; // closeGroup owns pendingGroupRisk; the shared reset must not clear it
+      case '|':
+        startAlternative(state);
+        break;
+      case '*':
+      case '+':
+      case '?': {
+        const risk = applyQuantifier(state);
+        if (risk !== undefined) return risk;
+        break;
+      }
+      case '{': {
+        const close = pattern.indexOf('}', index);
+        if (close > index) {
+          const risk = applyQuantifier(state);
+          if (risk !== undefined) return risk;
+          index = close;
+          break;
         }
+        noteAtom(state, '{');
+        break;
       }
-      pendingGroupRisk = undefined;
-      continue;
+      default:
+        noteAtom(state, character === '.' ? '*' : character);
+        break;
     }
-    if (character === ')') {
-      const frame = frames.pop();
-      if (frame !== undefined) {
-        pushAlternative(frame);
-        if (frame.hasQuantifier) pendingGroupRisk = 'nested quantifier';
-        else if (frame.alternatives.length > 1 && alternationIsAmbiguous(frame.alternatives)) {
-          pendingGroupRisk = 'ambiguous alternation';
-        } else pendingGroupRisk = undefined;
-      }
-      continue;
-    }
-    if (character === '|') {
-      const frame = frames.at(-1);
-      if (frame !== undefined) pushAlternative(frame);
-      pendingGroupRisk = undefined;
-      continue;
-    }
-    if (character === '*' || character === '+' || character === '?') {
-      if (pendingGroupRisk !== undefined) return pendingGroupRisk;
-      const frame = frames.at(-1);
-      if (frame !== undefined) frame.hasQuantifier = true;
-      pendingGroupRisk = undefined;
-      continue;
-    }
-    if (character === '{') {
-      const close = pattern.indexOf('}', index);
-      if (close > index) {
-        if (pendingGroupRisk !== undefined) return pendingGroupRisk;
-        const frame = frames.at(-1);
-        if (frame !== undefined) frame.hasQuantifier = true;
-        index = close;
-        pendingGroupRisk = undefined;
-        continue;
-      }
-    }
-    noteAtom(character === '.' ? '*' : character);
-    pendingGroupRisk = undefined;
+    state.pendingGroupRisk = undefined;
   }
   return undefined;
 }

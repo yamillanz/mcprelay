@@ -131,6 +131,19 @@ describe('policy hygiene (FR-Y6)', () => {
     expect(() => compile({ regex: '(' })).toThrowError(/policy\.rules\[0\]\.args\.path/);
   });
 
+  it('handles group prefixes, escaped class brackets, and literal braces', () => {
+    expect(() => compile({ regex: '^(?:GET|HEAD)$' })).not.toThrow();
+    expect(() => compile({ regex: '^(?<verb>GET|HEAD)$' })).not.toThrow();
+    expect(() => compile({ regex: '^[a\\]b]+$' })).not.toThrow();
+    expect(() => compile({ regex: 'a{b' })).not.toThrow();
+  });
+
+  it('still flags repetition inside prefixed groups and brace quantifiers', () => {
+    expect(() => compile({ regex: '(?:a+)+' })).toThrowError(/nested quantifier/i);
+    expect(() => compile({ regex: '(?<word>a+)+' })).toThrowError(/nested quantifier/i);
+    expect(() => compile({ regex: '(a{2,3})+' })).toThrowError(/nested quantifier/i);
+  });
+
   it('caps the matched input length', () => {
     const long = `/projects/${'a'.repeat(MAX_MATCH_INPUT_LENGTH)}`;
     expect(matchOne({ prefix: '/projects' }, long)).toBe(false);

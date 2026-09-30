@@ -39,6 +39,7 @@ Test-first (rule 11): each delta scenario becomes a failing test before its impl
 - [x] 7.1 Write ADR-0006: precedence/specificity table, matcher semantics, ReDoS bounds (and the rejected linear-time engine), denial error shape, dry-run marking
 - [x] 7.2 Update the living architecture diagram (policy node between bridge and retry) and re-deliver the HTML (showcase)
 - [x] 7.3 README policy section (rules, matchers, dry-run, `tools/list` answer, denial error) + AGENTS status line (M5 done → next M6)
+- [x] 7.4 Refactor `findRedosRisk` (human-requested, behavior-preserving): flatten the dispatch, extract named scan steps, characterization tests for group prefixes, escaped class brackets, and brace quantifiers
 
 ## 8. Verification and approval gates
 
@@ -50,5 +51,6 @@ Test-first (rule 11): each delta scenario becomes a failing test before its impl
     - allowed `write_file` + `read_file` work; log line `decision: denied`, `attempt: 0`
     - `--policy-dry-run`: call forwarded (file written), log `decision: denied` with `enforced: false` + stderr warning
     - `policy test --json` → exit 0, `{decision: deny, rule: 1}`; Store audit `kind: denied`, `detail.rule: 1`
-- [ ] 8.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
+- [x] 8.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
+  - Approved 2026-09-30: `9cb9d6b` spec + `4d351b2` feat, pushed to `origin/main`
 - [ ] 8.4 Human approval to archive (rule 0); archive the change after approval
