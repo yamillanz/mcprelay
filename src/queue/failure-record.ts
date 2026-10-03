@@ -5,6 +5,9 @@ import type { FailureClass } from '../pipeline/classify.js';
 /** Replay lifecycle of a captured record (Appendix A). */
 export type ReplayStatus = 'pending' | 'replayed' | 'discarded';
 
+/** Upstream transport a record was captured against. */
+export type ServerTransport = 'stdio' | 'http';
+
 /** Persisted failure classes (Appendix A; mapped from the D4 taxonomy). */
 export type RecordFailureClass =
   'transport' | 'timeout' | 'upstream_error' | 'non_retryable' | 'tool_error';
@@ -14,7 +17,7 @@ export interface FailureRecord {
   correlation_id: string;
   captured_at: string;
   caller: { type: 'stdio' | 'http'; identity: string };
-  server: { name: string; command: string };
+  server: { name: string; command: string; transport: ServerTransport };
   tool: { name: string; arguments_hash: string; arguments: unknown };
   failure: { class: RecordFailureClass; message: string; attempts: number };
   replay: { status: ReplayStatus; attempts: unknown[]; last_outcome: unknown | null };

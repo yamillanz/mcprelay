@@ -1,4 +1,4 @@
-import { ProtocolError, SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
+import { ProtocolError, SdkError, SdkErrorCode, SdkHttpError } from '@modelcontextprotocol/server';
 
 /** D4 failure classes (design D2, ADR-0003). */
 export type FailureClass =
@@ -80,6 +80,14 @@ export function classifyAttempt(
   }
   if (sdkCode === SdkErrorCode.ConnectionClosed) {
     // Ambiguous mid-call crash: it may have executed; conservative gate.
+    return { class: 'transport_post_execution', retry: policy.idempotent };
+  }
+
+  if (outcome.error instanceof SdkHttpError) {
+    // The request reached the server; a 4xx auth rejection will not fix itself.
+    if (outcome.error.status === 401 || outcome.error.status === 403) {
+      return { class: 'non_retryable', retry: false };
+    }
     return { class: 'transport_post_execution', retry: policy.idempotent };
   }
 

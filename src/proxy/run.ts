@@ -3,10 +3,15 @@ import { loadConfig, type McprelayConfig } from '../config/config.js';
 import { CallLogger } from '../observability/call-log.js';
 import { packageVersion } from '../version.js';
 import { startBridge } from './bridge.js';
+import type { UpstreamTarget } from './transports.js';
 
 export interface ProxyIO {
   stderr(text: string): void;
 }
+
+/** What to wrap: a local stdio command or a remote Streamable HTTP endpoint. */
+export type ProxyInvocation =
+  { kind: 'stdio'; command: string; args: readonly string[] } | { kind: 'http'; url: string };
 
 export interface ProxyOptions {
   configPath?: string;
@@ -16,13 +21,12 @@ export interface ProxyOptions {
 }
 
 /**
- * Wraps one upstream stdio server for the current process session.
+ * Wraps one upstream server for the current process session.
  * Returns the process exit code: 0 for a clean session, 2 for a configuration
  * error, 3 when the upstream died.
  */
 export async function runProxy(
-  command: string,
-  args: readonly string[],
+  invocation: ProxyInvocation,
   io: ProxyIO,
   options: ProxyOptions = {},
 ): Promise<number> {
@@ -42,12 +46,16 @@ export async function runProxy(
   }
   for (const warning of config.warnings) io.stderr(`mcprelay: warning: ${warning}\n`);
 
+  const target: UpstreamTarget =
+    invocation.kind === 'http'
+      ? { kind: 'http', url: invocation.url, headers: config.upstream.http.headers }
+      : { kind: 'stdio', command: invocation.command, args: invocation.args };
+
   const logger = new CallLogger(io.stderr);
   let bridge;
   try {
     bridge = await startBridge({
-      command,
-      args,
+      target,
       logger,
       stderr: io.stderr,
       version: packageVersion(),

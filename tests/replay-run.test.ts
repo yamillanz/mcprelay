@@ -54,7 +54,7 @@ function seed(dir: string, overrides: Partial<FailureRecord> = {}): FailureRecor
     correlation_id: 'corr-run-1',
     captured_at: '2026-09-29T10:00:00.000Z',
     caller: { type: 'stdio', identity: 'local' },
-    server: { name: 'echo-server', command: quoteCommandLine(NODE, [ECHO]) },
+    server: { name: 'echo-server', command: quoteCommandLine(NODE, [ECHO]), transport: 'stdio' },
     tool: { name: 'echo', arguments_hash: hashArguments({ value: 1 }), arguments: { value: 1 } },
     failure: { class: 'upstream_error', message: 'boom', attempts: 1 },
     replay: { status: 'pending', attempts: [], last_outcome: null },
@@ -165,7 +165,11 @@ describe('replay run: execution and capture', () => {
   it('releases the claim when the tool cannot be reached and leaves the record pending', async () => {
     const dir = workdir();
     const record = seed(dir, {
-      server: { name: 'broken', command: quoteCommandLine(NODE, ['/nonexistent/echo.js']) },
+      server: {
+        name: 'broken',
+        command: quoteCommandLine(NODE, ['/nonexistent/echo.js']),
+        transport: 'stdio',
+      },
     });
 
     const raw = run(dir, [record.id]);

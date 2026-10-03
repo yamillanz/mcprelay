@@ -1,7 +1,7 @@
 import { EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
 import { loadConfig } from '../config/config.js';
 import { runPolicy } from '../policy/policy-cli.js';
-import { runProxy } from '../proxy/run.js';
+import { runProxy, type ProxyInvocation } from '../proxy/run.js';
 import { runReplay } from '../replay/replay-cli.js';
 import { packageVersion } from '../version.js';
 
@@ -32,6 +32,8 @@ Run options:
   --timeout-ms <ms>     Per-call timeout; overrides the config file
   --max-attempts <n>    Retry bound; overrides the config file
   --policy-dry-run      Report policy decisions without enforcing them
+  --http <url>          Wrap a remote Streamable HTTP server instead of a
+                        local command (config: upstream.http.headers)
 
 Options:
   -h, --help      Show this help
@@ -48,7 +50,8 @@ dry-run and denial audit). HTTP transport lands next — see docs/PRD.md §12.
 `;
 
 interface RunInvocation {
-  command: string;
+  httpUrl?: string;
+  command?: string;
   args: string[];
   configPath?: string;
   timeoutMs?: number;
@@ -58,13 +61,15 @@ interface RunInvocation {
 
 type ParsedRun = { ok: true; invocation: RunInvocation } | { ok: false; message: string };
 
-const RUN_USAGE = 'Usage: mcprelay run [options] -- <server command…>';
+const RUN_USAGE =
+  'Usage: mcprelay run [options] -- <server command…>  |  mcprelay run [options] --http <url>';
 
 function parseRunInvocation(tokens: readonly string[]): ParsedRun {
   let configPath: string | undefined;
   let timeoutMs: number | undefined;
   let maxAttempts: number | undefined;
   let policyDryRun: boolean | undefined;
+  let httpUrl: string | undefined;
   let index = 0;
 
   while (index < tokens.length) {
@@ -73,6 +78,18 @@ function parseRunInvocation(tokens: readonly string[]): ParsedRun {
     if (token === '--policy-dry-run') {
       policyDryRun = true;
       index += 1;
+      continue;
+    }
+    if (token === '--http') {
+      const value = tokens[index + 1];
+      if (value === undefined) return { ok: false, message: "Missing value for '--http'." };
+      try {
+        new URL(value);
+      } catch {
+        return { ok: false, message: `Invalid URL for '--http': ${value}` };
+      }
+      httpUrl = value;
+      index += 2;
       continue;
     }
     if (token === '--config' || token === '--timeout-ms' || token === '--max-attempts') {
@@ -92,6 +109,26 @@ function parseRunInvocation(tokens: readonly string[]): ParsedRun {
       continue;
     }
     return { ok: false, message: `Unknown option '${token}'.` };
+  }
+
+  if (httpUrl !== undefined) {
+    if (tokens[index] === '--') {
+      return {
+        ok: false,
+        message: "Use either '--http <url>' or '-- <server command…>', not both.",
+      };
+    }
+    return {
+      ok: true,
+      invocation: {
+        httpUrl,
+        args: [],
+        ...(configPath === undefined ? {} : { configPath }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        ...(maxAttempts === undefined ? {} : { maxAttempts }),
+        ...(policyDryRun === undefined ? {} : { policyDryRun }),
+      },
+    };
   }
 
   if (tokens[index] !== '--' || tokens[index + 1] === undefined) {
@@ -145,8 +182,13 @@ async function runValidate(tokens: readonly string[], io: CliIO): Promise<number
 async function runWith(tokens: readonly string[], io: CliIO): Promise<number> {
   const parsed = parseRunInvocation(tokens);
   if (!parsed.ok) return usageError(io, parsed.message);
-  const { command, args, configPath, timeoutMs, maxAttempts, policyDryRun } = parsed.invocation;
-  return runProxy(command, args, io, {
+  const { httpUrl, command, args, configPath, timeoutMs, maxAttempts, policyDryRun } =
+    parsed.invocation;
+  const invocation: ProxyInvocation =
+    httpUrl !== undefined
+      ? { kind: 'http', url: httpUrl }
+      : { kind: 'stdio', command: command as string, args };
+  return runProxy(invocation, io, {
     ...(configPath === undefined ? {} : { configPath }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(maxAttempts === undefined ? {} : { maxAttempts }),
@@ -193,7 +235,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
     command === '--config' ||
     command === '--timeout-ms' ||
     command === '--max-attempts' ||
-    command === '--policy-dry-run'
+    command === '--policy-dry-run' ||
+    command === '--http'
   ) {
     return runWith(command === 'run' ? rest : argv, io);
   }

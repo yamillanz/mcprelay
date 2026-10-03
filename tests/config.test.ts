@@ -255,6 +255,35 @@ policy:
   });
 });
 
+describe('upstream HTTP section', () => {
+  it('parses configured headers', () => {
+    const path = writeConfig(
+      'upstream:\n  http:\n    headers:\n      x-test-header: configured-value\n',
+    );
+    const config = loadConfig({ path });
+    expect(config.upstream.http.headers).toEqual({ 'x-test-header': 'configured-value' });
+  });
+
+  it('defaults to no headers', () => {
+    expect(defaultConfig().upstream).toEqual({ http: { headers: {} } });
+  });
+
+  it('rejects malformed headers with path and field', () => {
+    const nonString = writeConfig('upstream:\n  http:\n    headers:\n      x-test-header: 42\n');
+    expect(() => loadConfig({ path: nonString })).toThrowError(
+      /upstream\.http\.headers\.x-test-header/,
+    );
+
+    const notMapping = writeConfig('upstream:\n  http:\n    headers: nope\n');
+    expect(() => loadConfig({ path: notMapping })).toThrowError(/upstream\.http\.headers/);
+  });
+
+  it('rejects unknown keys inside upstream', () => {
+    const path = writeConfig('upstream:\n  socks: {}\n');
+    expect(() => loadConfig({ path })).toThrowError(/upstream\.socks/);
+  });
+});
+
 describe('replay dedup window', () => {
   it('defaults to 24 hours', () => {
     expect(defaultConfig().reliability.replay.dedupWindowMs).toBe(24 * 60 * 60 * 1000);

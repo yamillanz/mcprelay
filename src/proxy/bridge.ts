@@ -31,7 +31,13 @@ import { classifyAttempt, type AttemptOutcome, type FailurePhase } from '../pipe
 import { extractIdempotencyKey } from '../pipeline/idempotency.js';
 import { runWithRetry } from '../pipeline/retry.js';
 import { createSessionContext, recordToolInventory, type SessionContext } from './session.js';
-import { ClientTransport, UpstreamTransport, type ClientTransportOptions } from './transports.js';
+import {
+  ClientTransport,
+  createUpstreamLink,
+  type ClientTransportOptions,
+  type UpstreamLink,
+  type UpstreamTarget,
+} from './transports.js';
 
 /** Permissive result schema: relay results without imposing a shape. */
 const PASSTHROUGH_SCHEMA: StandardSchemaV1 = {
@@ -43,8 +49,7 @@ const PASSTHROUGH_SCHEMA: StandardSchemaV1 = {
 };
 
 export interface BridgeOptions {
-  command: string;
-  args: readonly string[];
+  target: UpstreamTarget;
   logger: CallLogger;
   stderr(chunk: string): void;
   version: string;
@@ -110,7 +115,7 @@ interface InterceptionDeps {
   session: SessionContext;
   logger: CallLogger;
   config: McprelayConfig;
-  upstreamTransport: UpstreamTransport;
+  link: UpstreamLink;
   persistence: Persistence;
   serverCommand: string;
   stderr: (chunk: string) => void;
@@ -127,14 +132,14 @@ interface ServerFactoryDeps {
   logger: CallLogger;
   pinned: PinnedServerRef;
   config: McprelayConfig;
-  upstreamTransport: UpstreamTransport;
+  link: UpstreamLink;
   persistence: Persistence;
   serverCommand: string;
   stderr: (chunk: string) => void;
 }
 
 interface CloseBridgeDeps {
-  upstreamTransport: UpstreamTransport;
+  link: UpstreamLink;
   upstream: Client;
   handle: StdioServerHandle;
   clientTransport: ClientTransport;
@@ -160,14 +165,6 @@ function createCloseSignal(): CloseSignal {
   return { closed, resolveClosed };
 }
 
-function createUpstreamTransport(options: BridgeOptions): UpstreamTransport {
-  return new UpstreamTransport({
-    command: options.command,
-    args: options.args,
-    onStderr: options.stderr,
-  });
-}
-
 function createClientTransport(options: BridgeOptions): ClientTransport {
   const transportOptions: ClientTransportOptions = {};
   if (options.stdin !== undefined) transportOptions.stdin = options.stdin;
@@ -175,18 +172,26 @@ function createClientTransport(options: BridgeOptions): ClientTransport {
   return new ClientTransport(transportOptions);
 }
 
+const BATCH_UNSUPPORTED_FRAME = JSON.stringify({
+  jsonrpc: '2.0',
+  id: null,
+  error: {
+    code: -32600,
+    message: 'JSON-RPC batch frames are not supported over an HTTP upstream',
+  },
+});
+
 // Batch frames bypass the SDK protocol classes on both sides (documented
-// boundary: tools/call inside a batch is not intercepted).
-function relayBatchFrames(
-  clientTransport: ClientTransport,
-  upstreamTransport: UpstreamTransport,
-): void {
+// boundary: tools/call inside a batch is not intercepted). Over HTTP they are
+// answered with a clear error instead of being forwarded.
+function relayBatchFrames(clientTransport: ClientTransport, link: UpstreamLink): void {
   clientTransport.onBatch = (line) => {
-    upstreamTransport.sendRaw(line);
+    if (link.kind === 'stdio') link.sendBatch(line);
+    else clientTransport.sendRaw(BATCH_UNSUPPORTED_FRAME);
   };
-  upstreamTransport.onBatch = (line) => {
+  link.setBatchRelay((line) => {
     clientTransport.sendRaw(line);
-  };
+  });
 }
 
 function createUpstreamClient(options: BridgeOptions): Client {
@@ -227,11 +232,11 @@ function registerServerToClientRequestRelays(upstream: Client, pinned: PinnedSer
 function relayClientNotifications(
   clientTransport: ClientTransport,
   upstream: Client,
-  upstreamTransport: UpstreamTransport,
+  link: UpstreamLink,
   stderr: (chunk: string) => void,
 ): void {
   clientTransport.onNotification = (notification: JSONRPCNotification) => {
-    if (!upstreamTransport.connected) return;
+    if (!link.connected) return;
     void upstream
       .notification({ method: notification.method, params: notification.params })
       .catch((error: unknown) => stderr(`mcprelay: notification relay failed: ${String(error)}\n`));
@@ -241,31 +246,28 @@ function relayClientNotifications(
 // Upstream→client notifications are relayed verbatim; progress is excluded
 // because it is re-emitted with the client's original progress token by the
 // request pipeline.
-function relayUpstreamNotifications(
-  upstreamTransport: UpstreamTransport,
-  clientTransport: ClientTransport,
-): void {
-  upstreamTransport.onNotification = (notification: JSONRPCNotification) => {
+function relayUpstreamNotifications(link: UpstreamLink, clientTransport: ClientTransport): void {
+  link.relayNotifications((notification) => {
     if (notification.method === 'notifications/progress') return;
     clientTransport.sendRaw(serializeMessage(notification));
-  };
+  });
 }
 
 function wireCloseSignals(
   clientTransport: ClientTransport,
-  upstreamTransport: UpstreamTransport,
+  link: UpstreamLink,
   resolveClosed: ResolveClosed,
 ): void {
   clientTransport.onclose = () => {
     resolveClosed('client');
   };
-  upstreamTransport.onclose = () => {
+  link.setCloseRelay(() => {
     resolveClosed('upstream');
-  };
+  });
 }
 
-async function connectUpstream(upstream: Client, transport: UpstreamTransport): Promise<void> {
-  await upstream.connect(transport);
+async function connectUpstream(upstream: Client, link: UpstreamLink): Promise<void> {
+  await link.connect(upstream);
 }
 
 function captureSessionContext(
@@ -344,10 +346,16 @@ function buildCallLogEntry(fields: CallLogFields): CallLogEntry {
   };
 }
 
-function failurePhase(error: unknown, signal: AbortSignal | undefined): FailurePhase {
+function failurePhase(
+  error: unknown,
+  signal: AbortSignal | undefined,
+  kind: 'stdio' | 'http',
+): FailurePhase {
   if (signal?.aborted === true) return 'cancelled';
   if (error instanceof Error && error.name === 'AbortError') return 'cancelled';
   if (error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout) return 'timeout';
+  // An HTTP fetch-level failure never reached the server: retryable pre-send.
+  if (kind === 'http' && error instanceof TypeError) return 'pre_send';
   if (
     error instanceof SdkError &&
     (error.code === SdkErrorCode.NotConnected || error.code === SdkErrorCode.SendFailed)
@@ -377,7 +385,11 @@ async function captureFailure(deps: InterceptionDeps, input: CaptureInput): Prom
     correlation_id: input.correlationId,
     captured_at: new Date().toISOString(),
     caller: { type: 'stdio', identity: 'local' },
-    server: { name: deps.session.server.name, command: deps.serverCommand },
+    server: {
+      name: deps.session.server.name,
+      command: deps.serverCommand,
+      transport: deps.link.kind,
+    },
     tool: {
       name: input.tool,
       arguments_hash: hashArguments(input.rawArguments),
@@ -491,7 +503,7 @@ async function interceptToolCall(
 
   const result = await runWithRetry({
     attempt: async (): Promise<AttemptOutcome> => {
-      if (!deps.upstreamTransport.connected) {
+      if (!deps.link.connected) {
         return {
           kind: 'error',
           error: new Error('upstream transport is not connected'),
@@ -505,7 +517,7 @@ async function interceptToolCall(
         });
         return { kind: 'result', result: value };
       } catch (error) {
-        return { kind: 'error', error, phase: failurePhase(error, signal) };
+        return { kind: 'error', error, phase: failurePhase(error, signal, deps.link.kind) };
       }
     },
     classify: (outcome) => classifyAttempt(outcome, { idempotent: policy.idempotent }),
@@ -632,7 +644,7 @@ function createClientServerFactory(deps: ServerFactoryDeps): () => Server {
           session: deps.session,
           logger: deps.logger,
           config: deps.config,
-          upstreamTransport: deps.upstreamTransport,
+          link: deps.link,
           persistence: deps.persistence,
           serverCommand: deps.serverCommand,
           stderr: deps.stderr,
@@ -665,7 +677,7 @@ function chainClientClose(clientTransport: ClientTransport, resolveClosed: Resol
 }
 
 async function closeBridge(deps: CloseBridgeDeps): Promise<void> {
-  await deps.upstreamTransport.close();
+  await deps.link.close();
   await deps.upstream.close().catch(() => {});
   await deps.handle.close().catch(() => {});
   await deps.clientTransport.close();
@@ -673,26 +685,26 @@ async function closeBridge(deps: CloseBridgeDeps): Promise<void> {
 }
 
 /**
- * Wraps one upstream stdio server: connects upstream first, then serves the
- * client with the upstream's identity and capabilities. The body reads as the
- * startup sequence; each phase lives in a named helper above.
+ * Wraps one upstream server (stdio process or remote HTTP): connects upstream
+ * first, then serves the client with the upstream's identity and capabilities.
+ * The body reads as the startup sequence; each phase lives in a named helper.
  */
 export async function startBridge(options: BridgeOptions): Promise<Bridge> {
   const { closed, resolveClosed } = createCloseSignal();
-  const upstreamTransport = createUpstreamTransport(options);
+  const link = createUpstreamLink(options.target, options.stderr);
   const clientTransport = createClientTransport(options);
 
-  relayBatchFrames(clientTransport, upstreamTransport);
+  relayBatchFrames(clientTransport, link);
 
   const upstream = createUpstreamClient(options);
   const pinned = createPinnedServerRef();
   registerServerToClientRequestRelays(upstream, pinned);
-  relayClientNotifications(clientTransport, upstream, upstreamTransport, options.stderr);
-  relayUpstreamNotifications(upstreamTransport, clientTransport);
-  wireCloseSignals(clientTransport, upstreamTransport, resolveClosed);
+  relayClientNotifications(clientTransport, upstream, link, options.stderr);
+  relayUpstreamNotifications(link, clientTransport);
+  wireCloseSignals(clientTransport, link, resolveClosed);
 
   // Upstream first, so the client-facing server can mirror its capabilities.
-  await connectUpstream(upstream, upstreamTransport);
+  await connectUpstream(upstream, link);
   const session = captureSessionContext(upstream, { name: 'mcprelay', version: options.version });
 
   const persistence = createPersistence(options.config);
@@ -704,9 +716,9 @@ export async function startBridge(options: BridgeOptions): Promise<Bridge> {
       logger: options.logger,
       pinned,
       config: options.config,
-      upstreamTransport,
+      link,
       persistence,
-      serverCommand: quoteCommandLine(options.command, options.args),
+      serverCommand: serverCommandOf(options.target),
       stderr: options.stderr,
     }),
     {
@@ -719,6 +731,11 @@ export async function startBridge(options: BridgeOptions): Promise<Bridge> {
 
   return {
     closed,
-    close: () => closeBridge({ upstreamTransport, upstream, handle, clientTransport, persistence }),
+    close: () => closeBridge({ link, upstream, handle, clientTransport, persistence }),
   };
+}
+
+/** The record-facing target: the quoted stdio command, or the HTTP endpoint URL. */
+function serverCommandOf(target: UpstreamTarget): string {
+  return target.kind === 'stdio' ? quoteCommandLine(target.command, target.args) : target.url;
 }

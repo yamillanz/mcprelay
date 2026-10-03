@@ -29,7 +29,7 @@ function record(overrides: Partial<FailureRecord> = {}): FailureRecord {
     correlation_id: 'corr-1',
     captured_at: new Date().toISOString(),
     caller: { type: 'stdio', identity: 'local' },
-    server: { name: 'echo-server', command: 'node echo.js' },
+    server: { name: 'echo-server', command: 'node echo.js', transport: 'stdio' },
     tool: { name: 'echo', arguments_hash: 'a'.repeat(64), arguments: { safe: 'value' } },
     failure: { class: 'upstream_error', message: 'flaky failure 1', attempts: 3 },
     replay: { status: 'pending', attempts: [], last_outcome: null },
@@ -52,6 +52,83 @@ describe('QueueProvider contract', () => {
     const loaded = await provider.get(id);
     expect(loaded).toEqual(original);
     expect(await provider.get('missing-id')).toBeNull();
+  });
+
+  it('round-trips the http transport', async () => {
+    const { provider } = open();
+    const original = record({
+      server: {
+        name: 'http-echo-server',
+        command: 'http://127.0.0.1:9999/mcp',
+        transport: 'http',
+      },
+    });
+
+    await provider.enqueue(original);
+    const loaded = await provider.get(original.id);
+    expect(loaded?.server.transport).toBe('http');
+    expect(loaded?.server.command).toBe('http://127.0.0.1:9999/mcp');
+  });
+
+  it('migrates pre-M6 databases to transport stdio', async () => {
+    const path = queuePath();
+    mkdirSync(dirname(path), { recursive: true });
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE failures (
+        id TEXT PRIMARY KEY,
+        correlation_id TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        caller_type TEXT NOT NULL,
+        caller_identity TEXT NOT NULL,
+        server_name TEXT NOT NULL,
+        server_command TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_hash TEXT NOT NULL,
+        arguments TEXT NOT NULL,
+        failure_class TEXT NOT NULL,
+        failure_message TEXT NOT NULL,
+        failure_attempts INTEGER NOT NULL,
+        replay_status TEXT NOT NULL DEFAULT 'pending',
+        replay_attempts TEXT NOT NULL DEFAULT '[]',
+        last_outcome TEXT,
+        resolved_at TEXT
+      );
+    `);
+    legacy
+      .prepare(
+        `INSERT INTO failures (
+          id, correlation_id, captured_at, caller_type, caller_identity,
+          server_name, server_command, tool_name, arguments_hash, arguments,
+          failure_class, failure_message, failure_attempts,
+          replay_status, replay_attempts, last_outcome, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '01J00000000000000000000000',
+        'corr-old',
+        '2026-09-01T00:00:00.000Z',
+        'stdio',
+        'local',
+        'old-server',
+        'node old.js',
+        'echo',
+        'a'.repeat(64),
+        '{}',
+        'upstream_error',
+        'old failure',
+        1,
+        'pending',
+        '[]',
+        null,
+        null,
+      );
+    legacy.close();
+
+    const { provider } = open(path);
+    const loaded = await provider.get('01J00000000000000000000000');
+    expect(loaded?.server.transport).toBe('stdio');
+    expect(loaded?.server.command).toBe('node old.js');
   });
 
   it('lists with filters', async () => {

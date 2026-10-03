@@ -50,7 +50,7 @@ function seedRecord(dir: string, argumentsValue: unknown): FailureRecord {
     correlation_id: 'corr-policy-1',
     captured_at: '2026-09-29T12:00:00.000Z',
     caller: { type: 'stdio', identity: 'local' },
-    server: { name: 'echo-server', command: 'node echo.js' },
+    server: { name: 'echo-server', command: 'node echo.js', transport: 'stdio' },
     tool: { name: 'echo', arguments_hash: 'c'.repeat(64), arguments: argumentsValue },
     failure: { class: 'upstream_error', message: 'boom', attempts: 1 },
     replay: { status: 'pending', attempts: [], last_outcome: null },

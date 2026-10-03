@@ -6,7 +6,7 @@ import { extractIdempotencyKey } from '../pipeline/idempotency.js';
 import type { FailureRecord } from '../queue/failure-record.js';
 import { RecordNotFoundError, SqliteQueueProvider } from '../queue/sqlite-queue.js';
 import { redactDeep } from '../redaction/redact.js';
-import { UpstreamTransport } from '../proxy/transports.js';
+import { HttpUpstreamLink, StdioUpstreamLink, type UpstreamLink } from '../proxy/transports.js';
 import { SqliteStore } from '../store/sqlite-store.js';
 import { packageVersion } from '../version.js';
 import { parseCommandLine } from './command-line.js';
@@ -160,18 +160,23 @@ async function claimOrReport(
   }
 }
 
-async function connectStoredServer(commandLine: string): Promise<{
-  client: Client;
-  transport: UpstreamTransport;
-}> {
-  const { command, args } = parseCommandLine(commandLine);
-  const transport = new UpstreamTransport({
-    command,
-    args,
-    onStderr: (chunk) => {
-      process.stderr.write(chunk);
-    },
-  });
+/** Reconnects over the record's transport: stdio command, or HTTP endpoint + config headers. */
+async function connectStoredServer(
+  record: FailureRecord,
+  config: McprelayConfig,
+): Promise<{ client: Client; link: UpstreamLink }> {
+  const link: UpstreamLink =
+    record.server.transport === 'http'
+      ? new HttpUpstreamLink({
+          url: record.server.command,
+          headers: config.upstream.http.headers,
+        })
+      : new StdioUpstreamLink({
+          ...parseCommandLine(record.server.command),
+          onStderr: (chunk) => {
+            process.stderr.write(chunk);
+          },
+        });
   const client = new Client(
     { name: 'mcprelay-replay', version: packageVersion() },
     {
@@ -179,15 +184,12 @@ async function connectStoredServer(commandLine: string): Promise<{
       capabilities: { sampling: {}, elicitation: {}, roots: { listChanged: true } },
     },
   );
-  await client.connect(transport);
-  return { client, transport };
+  await link.connect(client);
+  return { client, link };
 }
 
-async function closeUpstream(upstream: {
-  client: Client;
-  transport: UpstreamTransport;
-}): Promise<void> {
-  await upstream.transport.close().catch(() => {});
+async function closeUpstream(upstream: { client: Client; link: UpstreamLink }): Promise<void> {
+  await upstream.link.close().catch(() => {});
   await upstream.client.close().catch(() => {});
 }
 
@@ -202,9 +204,9 @@ async function attemptReplay(
   record: FailureRecord,
   replayArguments: Record<string, unknown>,
 ): Promise<ReplayAttempt> {
-  let upstream: { client: Client; transport: UpstreamTransport };
+  let upstream: { client: Client; link: UpstreamLink };
   try {
-    upstream = await connectStoredServer(record.server.command);
+    upstream = await connectStoredServer(record, config);
   } catch (error) {
     return {
       kind: 'unreachable',
@@ -346,9 +348,9 @@ async function runDryRun(deps: {
   reportDryRunSummary(io, record);
   reportDryRunGuards(deps);
 
-  let upstream: { client: Client; transport: UpstreamTransport } | undefined;
+  let upstream: { client: Client; link: UpstreamLink } | undefined;
   try {
-    upstream = await connectStoredServer(record.server.command);
+    upstream = await connectStoredServer(record, deps.config);
     const tools = await listToolNames(upstream.client);
     if (!tools.includes(record.tool.name)) {
       io.stderr(`mcprelay: tool '${record.tool.name}' does not exist upstream; replay aborted\n`);

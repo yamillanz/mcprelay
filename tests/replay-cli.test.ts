@@ -26,7 +26,7 @@ function seeded(): { dir: string; configPath: string; record: FailureRecord } {
     correlation_id: 'corr-replay-1',
     captured_at: '2026-09-28T12:00:00.000Z',
     caller: { type: 'stdio', identity: 'local' },
-    server: { name: 'echo-server', command: 'node echo.js' },
+    server: { name: 'echo-server', command: 'node echo.js', transport: 'stdio' },
     tool: { name: 'flaky', arguments_hash: 'b'.repeat(64), arguments: { api_key: '[REDACTED]' } },
     failure: { class: 'upstream_error', message: 'flaky failure 1', attempts: 3 },
     replay: { status: 'pending', attempts: [], last_outcome: null },

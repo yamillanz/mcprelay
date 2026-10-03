@@ -73,3 +73,36 @@ describe('mcprelay usage errors', () => {
     expect(stderr()).toContain('--no-such-flag');
   });
 });
+
+describe('mcprelay run transport forms', () => {
+  it('rejects --http combined with -- as a usage error', async () => {
+    const { io, stderr } = capture();
+    const code = await runCli(
+      ['run', '--http', 'http://127.0.0.1:1/mcp', '--', 'node', 'server.js'],
+      io,
+    );
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr()).toContain('not both');
+  });
+
+  it('rejects a missing --http value', async () => {
+    const { io, stderr } = capture();
+    const code = await runCli(['run', '--http'], io);
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr()).toContain("Missing value for '--http'");
+  });
+
+  it('rejects an invalid --http URL', async () => {
+    const { io, stderr } = capture();
+    const code = await runCli(['run', '--http', 'not a url'], io);
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr()).toContain('Invalid URL');
+  });
+
+  it('still requires a target when neither form is given', async () => {
+    const { io, stderr } = capture();
+    const code = await runCli(['run'], io);
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr()).toContain('--http');
+  });
+});

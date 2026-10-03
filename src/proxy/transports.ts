@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
+import { StreamableHTTPClientTransport, type Client } from '@modelcontextprotocol/client';
 import {
   deserializeMessage,
   isJSONRPCNotification,
@@ -139,6 +140,116 @@ export class UpstreamTransport implements Transport {
     this.closed = true;
     this.onclose?.();
   }
+}
+
+/** Upstream to wrap: a local stdio process or a remote Streamable HTTP server. */
+export type UpstreamTarget =
+  | { kind: 'stdio'; command: string; args: readonly string[] }
+  | { kind: 'http'; url: string; headers: Record<string, string> };
+
+/** What the bridge needs from an upstream connection, independent of its transport. */
+export interface UpstreamLink {
+  readonly kind: 'stdio' | 'http';
+  readonly connected: boolean;
+  connect(client: Client): Promise<void>;
+  relayNotifications(relay: (notification: JSONRPCNotification) => void): void;
+  setCloseRelay(relay: () => void): void;
+  sendBatch(line: string): void;
+  setBatchRelay(relay: (line: string) => void): void;
+  close(): Promise<void>;
+}
+
+export class StdioUpstreamLink implements UpstreamLink {
+  readonly kind = 'stdio' as const;
+  private readonly transport: UpstreamTransport;
+
+  constructor(options: UpstreamTransportOptions) {
+    this.transport = new UpstreamTransport(options);
+  }
+
+  get connected(): boolean {
+    return this.transport.connected;
+  }
+
+  async connect(client: Client): Promise<void> {
+    await client.connect(this.transport);
+  }
+
+  relayNotifications(relay: (notification: JSONRPCNotification) => void): void {
+    this.transport.onNotification = relay;
+  }
+
+  setCloseRelay(relay: () => void): void {
+    this.transport.onclose = relay;
+  }
+
+  sendBatch(line: string): void {
+    this.transport.sendRaw(line);
+  }
+
+  setBatchRelay(relay: (line: string) => void): void {
+    this.transport.onBatch = relay;
+  }
+
+  async close(): Promise<void> {
+    await this.transport.close();
+  }
+}
+
+export class HttpUpstreamLink implements UpstreamLink {
+  readonly kind = 'http' as const;
+  private readonly transport: StreamableHTTPClientTransport;
+  private relay: ((notification: JSONRPCNotification) => void) | undefined;
+  private started = false;
+  private closed = false;
+
+  constructor(options: { url: string; headers: Record<string, string> }) {
+    this.transport = new StreamableHTTPClientTransport(new URL(options.url), {
+      requestInit: { headers: options.headers },
+    });
+  }
+
+  get connected(): boolean {
+    return this.started && !this.closed;
+  }
+
+  async connect(client: Client): Promise<void> {
+    await client.connect(this.transport);
+    // Wrap after connect: the protocol layer assigns `onmessage` during it.
+    const downstream = this.transport.onmessage;
+    this.transport.onmessage = (message) => {
+      if (isJSONRPCNotification(message)) this.relay?.(message);
+      downstream?.(message);
+    };
+    this.started = true;
+  }
+
+  relayNotifications(relay: (notification: JSONRPCNotification) => void): void {
+    this.relay = relay;
+  }
+
+  setCloseRelay(relay: () => void): void {
+    this.transport.onclose = relay;
+  }
+
+  /** Batch frames are not supported over HTTP; the bridge answers the client instead. */
+  sendBatch(_line: string): void {}
+
+  setBatchRelay(_relay: (line: string) => void): void {}
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.transport.close().catch(() => {});
+  }
+}
+
+export function createUpstreamLink(
+  target: UpstreamTarget,
+  onStderr: (chunk: string) => void,
+): UpstreamLink {
+  return target.kind === 'stdio'
+    ? new StdioUpstreamLink({ command: target.command, args: target.args, onStderr })
+    : new HttpUpstreamLink({ url: target.url, headers: target.headers });
 }
 
 export interface ClientTransportOptions {

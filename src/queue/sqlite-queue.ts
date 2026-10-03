@@ -10,6 +10,7 @@ import type {
   FailureRecord,
   HealthStatus,
   ReplayOutcome,
+  ServerTransport,
 } from './failure-record.js';
 
 export class AlreadyResolvedError extends Error {
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS failures (
   caller_identity TEXT NOT NULL,
   server_name TEXT NOT NULL,
   server_command TEXT NOT NULL,
+  server_transport TEXT NOT NULL DEFAULT 'stdio',
   tool_name TEXT NOT NULL,
   arguments_hash TEXT NOT NULL,
   arguments TEXT NOT NULL,
@@ -97,6 +99,7 @@ interface FailureRow {
   caller_identity: string;
   server_name: string;
   server_command: string;
+  server_transport: string;
   tool_name: string;
   arguments_hash: string;
   arguments: string;
@@ -167,7 +170,11 @@ function toRecord(row: FailureRow): FailureRecord {
     correlation_id: row.correlation_id,
     captured_at: row.captured_at,
     caller: { type: row.caller_type as 'stdio' | 'http', identity: row.caller_identity },
-    server: { name: row.server_name, command: row.server_command },
+    server: {
+      name: row.server_name,
+      command: row.server_command,
+      transport: row.server_transport as ServerTransport,
+    },
     tool: {
       name: row.tool_name,
       arguments_hash: row.arguments_hash,
@@ -203,6 +210,12 @@ export class SqliteQueueProvider implements QueueProvider, IdempotencyIndex {
     this.db.exec(SCHEMA);
     ensureColumn(this.db, 'failures', 'claimed_at', 'claimed_at TEXT');
     ensureColumn(this.db, 'failures', 'claim_expires_at', 'claim_expires_at TEXT');
+    ensureColumn(
+      this.db,
+      'failures',
+      'server_transport',
+      "server_transport TEXT NOT NULL DEFAULT 'stdio'",
+    );
   }
 
   async enqueue(record: FailureRecord): Promise<string> {
@@ -210,10 +223,10 @@ export class SqliteQueueProvider implements QueueProvider, IdempotencyIndex {
       .prepare(
         `INSERT INTO failures (
           id, correlation_id, captured_at, caller_type, caller_identity,
-          server_name, server_command, tool_name, arguments_hash, arguments,
+          server_name, server_command, server_transport, tool_name, arguments_hash, arguments,
           failure_class, failure_message, failure_attempts,
           replay_status, replay_attempts, last_outcome
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -223,6 +236,7 @@ export class SqliteQueueProvider implements QueueProvider, IdempotencyIndex {
         record.caller.identity,
         record.server.name,
         record.server.command,
+        record.server.transport,
         record.tool.name,
         record.tool.arguments_hash,
         JSON.stringify(record.tool.arguments ?? null),

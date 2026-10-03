@@ -2,7 +2,7 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M5 — policy engine.** Wrap any stdio server, pass the session through semantically unchanged, apply per-call timeouts and classified retries, enforce declarative allow/deny policy (with dry-run), capture failed calls into a durable, redacted dead-letter queue, and **replay them as redrive for side effects** — with an idempotency guard against duplicates. Per-tool metrics land in a later milestone ([`docs/PRD.md`](docs/PRD.md) §12).
+> **Status: M6 — HTTP upstreams.** Wrap any stdio server **or a remote Streamable HTTP server** with the same pipeline: per-call timeouts and classified retries, declarative allow/deny policy (with dry-run), a durable, redacted dead-letter queue, and **replay as redrive for side effects** — with an idempotency guard against duplicates. Per-tool metrics land in a later milestone ([`docs/PRD.md`](docs/PRD.md) §12).
 >
 > Published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare `mcprelay` name is blocked by npm's name-similarity policy; scoped fallback per PRD §11 — the installed command is still `mcprelay`).
 
@@ -61,9 +61,42 @@ npx @yamillanz/mcprelay run -- npx @modelcontextprotocol/server-filesystem .
 
 Requires Node.js ≥ 20.19.
 
+### Remote HTTP servers
+
+The client side stays stdio; the upstream can be a remote Streamable HTTP MCP server:
+
+```sh
+mcprelay run --http https://mcp.example.com/mcp
+```
+
+or from a client config:
+
+```json
+{
+  "mcpServers": {
+    "remote": {
+      "command": "npx",
+      "args": ["-y", "@yamillanz/mcprelay", "run", "--http", "https://mcp.example.com/mcp"]
+    }
+  }
+}
+```
+
+Upstream credentials are the middleware's own — **client tokens are never forwarded upstream** (FR-A3). Configure them in `mcprelay.config.yaml`; values are never logged or persisted:
+
+```yaml
+upstream:
+  http:
+    headers:
+      authorization: Bearer <your-token>
+```
+
+Policy, retries, DLQ capture, and replay work identically over HTTP, and records remember the transport so `replay` reconnects to the same endpoint. Two boundaries to know: **JSON-RPC batch frames are stdio-only** (the 2026-07-28 revision removed batching; over HTTP the middleware answers with a clear error), and OAuth/JWT identities land with M9.
+
 ## What works today
 
 - **Wrap any stdio server 1:1** — `mcprelay run -- <server command…>` (also `mcprelay -- <server command…>`). The upstream runs unmodified and unaware.
+- **Wrap a remote HTTP server** — `mcprelay run --http <url>` speaks Streamable HTTP to the upstream while the client side stays stdio. Same policy, retries, DLQ, replay, and logs; upstream headers come from `upstream.http.headers`.
 - **Protocol fidelity** — everything except `tools/call` passes through semantically unchanged: `tools/list`, `resources/*`, `prompts/*`, `completion/*`, `logging/setLevel`, server→client requests (`sampling/createMessage`, `elicitation/create`, `roots/list`), progress, custom methods, and JSON-RPC batch frames.
 - **Policy without surprises** — declarative allow/deny by tool (globs), caller identity, and argument matchers (`equals`, `in`, `prefix`, `regex`, `max_length`, numeric bounds), with most-specific-wins precedence. Denied calls get a standard MCP error (`-32001`), an audit entry, and a log line — and are never forwarded upstream or written to the DLQ. `tools/list` is never filtered. `--policy-dry-run` reports decisions without enforcing; `mcprelay policy test` evaluates a call (or a stored failure) before you enforce anything.
 - **Timeout + classified retries** — per-call timeout; transient failures retry with exponential backoff, gated by the failure-class taxonomy: timeouts and upstream errors retry only for tools marked `idempotent: true`; `isError` and protocol errors never retry; client cancellation aborts without retrying.
@@ -174,7 +207,7 @@ npm run format:check
 npm run build
 ```
 
-Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics, 0006 policy engine); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
+Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics, 0006 policy engine, 0007 HTTP transport); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
 
 ## License
 

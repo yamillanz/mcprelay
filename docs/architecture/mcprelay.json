@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "mcprelay M5 — policy gate before the retry pipeline",
+    "title": "mcprelay M6 — stdio or HTTP upstreams on one pipeline",
     "output": "mcprelay.html",
     "quality_profile": "showcase",
     "viewBox": [
@@ -118,8 +118,8 @@
     {
       "id": "upstream-transport",
       "type": "backend",
-      "label": "UpstreamTransport",
-      "sublabel": "spawn + newline JSON-RPC",
+      "label": "Upstream transport",
+      "sublabel": "spawn stdio · streamable HTTP",
       "pos": [
         1046,
         330
@@ -132,8 +132,8 @@
     {
       "id": "server",
       "type": "external",
-      "label": "Wrapped MCP Server",
-      "sublabel": "any stdio server",
+      "label": "MCP Server",
+      "sublabel": "local stdio · remote HTTP",
       "pos": [
         1046,
         450
@@ -148,7 +148,7 @@
       "type": "database",
       "label": "DLQ + Store",
       "sublabel": "queue.db + history.db",
-      "tag": "WAL · redaction · replay",
+      "tag": "WAL · redaction · server.transport",
       "pos": [
         694,
         60
@@ -209,7 +209,7 @@
     },
     {
       "kind": "region",
-      "label": "upstream process",
+      "label": "upstream server — spawned or remote",
       "wraps": [
         "server",
         "replay-cli"

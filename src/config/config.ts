@@ -60,12 +60,17 @@ export interface RedactionConfig {
   patterns: string[];
 }
 
+export interface UpstreamConfig {
+  http: { headers: Record<string, string> };
+}
+
 export interface McprelayConfig {
   reliability: ReliabilityConfig;
   queue: QueueConfig;
   store: StoreConfig;
   redaction: RedactionConfig;
   policy: PolicyConfig;
+  upstream: UpstreamConfig;
   /** Runtime-only (CLI flag): evaluate policy but do not enforce. */
   policyDryRun: boolean;
   warnings: string[];
@@ -118,6 +123,7 @@ export function defaultConfig(): McprelayConfig {
     store: { provider: 'sqlite', sqlite: { path: './.mcprelay/history.db' } },
     redaction: { patterns: [...DEFAULT_REDACTION_PATTERNS] },
     policy: defaultPolicyConfig(),
+    upstream: { http: { headers: {} } },
     policyDryRun: false,
     warnings: [],
   };
@@ -324,7 +330,14 @@ function parseConfigDocument(text: string, path: string): Record<string, unknown
   return raw;
 }
 
-const TOP_LEVEL_KEYS = new Set(['reliability', 'queue', 'store', 'redaction', 'policy']);
+const TOP_LEVEL_KEYS = new Set([
+  'reliability',
+  'queue',
+  'store',
+  'redaction',
+  'policy',
+  'upstream',
+]);
 
 function applySqliteSection(
   target: { provider: 'sqlite'; sqlite: { path: string } },
@@ -372,6 +385,32 @@ function applyRedaction(config: McprelayConfig, raw: unknown, label: string): vo
   }
 }
 
+const UPSTREAM_KEYS = new Set(['http']);
+const UPSTREAM_HTTP_KEYS = new Set(['headers']);
+
+function applyUpstreamHeaders(target: Record<string, string>, raw: unknown, label: string): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping of header names`);
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== 'string') {
+      throw new ConfigError(`${label}.${name}: expected a string, got ${JSON.stringify(value)}`);
+    }
+    target[name] = value;
+  }
+}
+
+function applyUpstream(config: McprelayConfig, raw: unknown, label: string): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
+  assertKnownKeys(raw, UPSTREAM_KEYS, label);
+  if ('http' in raw) {
+    const http = raw.http;
+    if (!isRecord(http)) throw new ConfigError(`${label}.http: expected a mapping`);
+    assertKnownKeys(http, UPSTREAM_HTTP_KEYS, `${label}.http`);
+    if ('headers' in http) {
+      applyUpstreamHeaders(config.upstream.http.headers, http.headers, `${label}.http.headers`);
+    }
+  }
+}
+
 function applyPolicy(config: McprelayConfig, raw: unknown, label: string): void {
   try {
     config.policy = parsePolicyConfig(raw, label);
@@ -398,6 +437,7 @@ function applyConfigDocument(
   if ('store' in document) applySqliteSection(config.store, document.store, `${path}: store`);
   if ('redaction' in document) applyRedaction(config, document.redaction, `${path}: redaction`);
   if ('policy' in document) applyPolicy(config, document.policy, `${path}: policy`);
+  if ('upstream' in document) applyUpstream(config, document.upstream, `${path}: upstream`);
 }
 
 function applyOverrides(config: McprelayConfig, overrides: ConfigOverrides | undefined): void {
