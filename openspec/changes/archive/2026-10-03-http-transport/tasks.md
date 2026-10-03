@@ -57,5 +57,7 @@ Test-first (rule 11): every implementation group starts with its failing tests. 
   - Same config, stdio filesystem: `read_file` allowed, denied `write_file` (`-32001`, file absent), allowed write
   - Same config, hermetic HTTP: denied `echo` (`-32001`), `sleep` timeout captured (`server.transport: http`, class `timeout`), `replay run` with a different timeout config → `replay ok`; audit chain `denied → captured → replayed`
   - Public endpoint: `run --http https://mcp.deepwiki.com/mcp` initialized and mirrored the session (`serverInfo: DeepWiki 2.14.3`)
-- [ ] 7.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-- [ ] 7.4 Human approval to archive (rule 0); archive the change after approval
+- [x] 7.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
+  - Approved 2026-10-03: `27934f6` feat pushed to `origin/main`
+- [x] 7.4 Human approval to archive (rule 0); archive the change after approval
+  - Approved and archived 2026-10-03 as `2026-10-03-http-transport`
