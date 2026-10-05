@@ -23,6 +23,58 @@ function splitLines(buffer: string, chunk: string): { lines: string[]; rest: str
   return { lines: parts.map((line) => line.trim()).filter((line) => line.length > 0), rest };
 }
 
+interface FrameHandlers {
+  onerror?: (error: Error) => void;
+  onmessage?: (message: JSONRPCMessage) => void;
+  onBatch?: (line: string) => void;
+  onNotification?: (notification: JSONRPCNotification) => void;
+}
+
+/**
+ * Line-framing pipeline shared by the upstream and client-facing transports:
+ * buffers chunks, parses frames, and dispatches batches, notifications,
+ * messages, and errors to the owning transport's handlers.
+ */
+class FrameDecoder {
+  private buffer = '';
+  private processing: Promise<void> = Promise.resolve();
+
+  constructor(private readonly handlers: FrameHandlers) {}
+
+  push(chunk: string): void {
+    const { lines, rest } = splitLines(this.buffer, chunk);
+    this.buffer = rest;
+    for (const line of lines) {
+      // The SDK dispatches notification handlers as microtasks; yielding
+      // between frames keeps progress notifications from being overtaken by a
+      // response that arrived in the same chunk.
+      this.processing = this.processing.then(() => this.processLine(line));
+    }
+  }
+
+  private async processLine(line: string): Promise<void> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch (error) {
+      this.handlers.onerror?.(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    if (Array.isArray(parsed)) {
+      this.handlers.onBatch?.(line);
+      return;
+    }
+    try {
+      const message = deserializeMessage(line);
+      if (isJSONRPCNotification(message)) this.handlers.onNotification?.(message);
+      this.handlers.onmessage?.(message);
+    } catch (error) {
+      this.handlers.onerror?.(error instanceof Error ? error : new Error(String(error)));
+    }
+    await Promise.resolve();
+  }
+}
+
 /**
  * Transport for the wrapped upstream server: spawns the command and speaks
  * newline-delimited JSON-RPC. Single messages go through the SDK protocol
@@ -36,13 +88,14 @@ export class UpstreamTransport implements Transport {
   onBatch?: (line: string) => void;
   onNotification?: (notification: JSONRPCNotification) => void;
 
+  private readonly decoder: FrameDecoder;
   private child?: ChildProcessWithoutNullStreams;
-  private buffer = '';
   private closed = false;
-  private processing: Promise<void> = Promise.resolve();
   private closing = false;
 
-  constructor(private readonly options: UpstreamTransportOptions) {}
+  constructor(private readonly options: UpstreamTransportOptions) {
+    this.decoder = new FrameDecoder(this);
+  }
 
   /** True once the upstream process has been spawned and is still alive. */
   get connected(): boolean {
@@ -50,35 +103,10 @@ export class UpstreamTransport implements Transport {
   }
 
   async start(): Promise<void> {
-    const child = spawn(this.options.command, [...this.options.args], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
-    }) as ChildProcessWithoutNullStreams;
-    this.child = child;
-
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      this.onData(chunk);
-    });
-
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => {
-      this.options.onStderr(chunk);
-    });
-
-    child.on('error', (error: Error) => {
-      this.onerror?.(error);
-      this.finish();
-    });
-
-    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-      if (!this.closing && (code !== 0 || signal !== null)) {
-        this.onerror?.(
-          new Error(`upstream exited (code ${String(code)}, signal ${String(signal)})`),
-        );
-      }
-      this.finish();
-    });
+    const child = this.spawnChild();
+    this.forwardUpstreamStderr(child);
+    this.watchChildError(child);
+    this.watchChildExit(child);
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
@@ -98,41 +126,47 @@ export class UpstreamTransport implements Transport {
     this.finish();
   }
 
+  private spawnChild(): ChildProcessWithoutNullStreams {
+    const child = spawn(this.options.command, [...this.options.args], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    }) as ChildProcessWithoutNullStreams;
+    this.child = child;
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      this.decoder.push(chunk);
+    });
+    return child;
+  }
+
+  private forwardUpstreamStderr(child: ChildProcessWithoutNullStreams): void {
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      this.options.onStderr(chunk);
+    });
+  }
+
+  private watchChildError(child: ChildProcessWithoutNullStreams): void {
+    child.on('error', (error: Error) => {
+      this.onerror?.(error);
+      this.finish();
+    });
+  }
+
+  private watchChildExit(child: ChildProcessWithoutNullStreams): void {
+    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+      if (!this.closing && (code !== 0 || signal !== null)) {
+        this.onerror?.(
+          new Error(`upstream exited (code ${String(code)}, signal ${String(signal)})`),
+        );
+      }
+      this.finish();
+    });
+  }
+
   private writeLine(line: string): void {
     this.child?.stdin.write(`${line}\n`);
-  }
-
-  private onData(chunk: string): void {
-    const { lines, rest } = splitLines(this.buffer, chunk);
-    this.buffer = rest;
-    for (const line of lines) {
-      // The SDK dispatches notification handlers as microtasks; yielding
-      // between frames keeps progress notifications from being overtaken by a
-      // response that arrived in the same chunk.
-      this.processing = this.processing.then(() => this.processLine(line));
-    }
-  }
-
-  private async processLine(line: string): Promise<void> {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch (error) {
-      this.onerror?.(error instanceof Error ? error : new Error(String(error)));
-      return;
-    }
-    if (Array.isArray(parsed)) {
-      this.onBatch?.(line);
-      return;
-    }
-    try {
-      const message = deserializeMessage(line);
-      if (isJSONRPCNotification(message)) this.onNotification?.(message);
-      this.onmessage?.(message);
-    } catch (error) {
-      this.onerror?.(error instanceof Error ? error : new Error(String(error)));
-    }
-    await Promise.resolve();
   }
 
   private finish(): void {
@@ -214,7 +248,15 @@ export class HttpUpstreamLink implements UpstreamLink {
   }
 
   async connect(client: Client): Promise<void> {
+    await this.connectTransport(client);
+    this.mirrorNotificationsAfterConnect();
+  }
+
+  private async connectTransport(client: Client): Promise<void> {
     await client.connect(this.transport);
+  }
+
+  private mirrorNotificationsAfterConnect(): void {
     // Wrap after connect: the protocol layer assigns `onmessage` during it.
     const downstream = this.transport.onmessage;
     this.transport.onmessage = (message) => {
@@ -268,18 +310,15 @@ export class ClientTransport implements Transport {
   onBatch?: (line: string) => void;
   onNotification?: (notification: JSONRPCNotification) => void;
 
-  private buffer = '';
+  private readonly decoder: FrameDecoder;
   private closed = false;
-  private processing: Promise<void> = Promise.resolve();
 
-  constructor(private readonly options: ClientTransportOptions = {}) {}
+  constructor(private readonly options: ClientTransportOptions = {}) {
+    this.decoder = new FrameDecoder(this);
+  }
 
   async start(): Promise<void> {
-    const stdin = this.options.stdin ?? process.stdin;
-    stdin.setEncoding('utf8');
-    stdin.on('data', this.onDataHandler);
-    stdin.on('end', this.onEndHandler);
-    stdin.resume();
+    this.attachStdin();
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
@@ -293,15 +332,27 @@ export class ClientTransport implements Transport {
 
   async close(): Promise<void> {
     if (this.closed) return;
+    this.detachStdin();
+    this.finish();
+  }
+
+  private attachStdin(): void {
+    const stdin = this.options.stdin ?? process.stdin;
+    stdin.setEncoding('utf8');
+    stdin.on('data', this.onDataHandler);
+    stdin.on('end', this.onEndHandler);
+    stdin.resume();
+  }
+
+  private detachStdin(): void {
     const stdin = this.options.stdin ?? process.stdin;
     stdin.off('data', this.onDataHandler);
     stdin.off('end', this.onEndHandler);
     stdin.pause();
-    this.finish();
   }
 
   private readonly onDataHandler = (chunk: string): void => {
-    this.onData(chunk);
+    this.decoder.push(chunk);
   };
 
   private readonly onEndHandler = (): void => {
@@ -311,39 +362,6 @@ export class ClientTransport implements Transport {
   private writeLine(line: string): void {
     const stdout = this.options.stdout ?? process.stdout;
     stdout.write(`${line}\n`);
-  }
-
-  private onData(chunk: string): void {
-    const { lines, rest } = splitLines(this.buffer, chunk);
-    this.buffer = rest;
-    for (const line of lines) {
-      // The SDK dispatches notification handlers as microtasks; yielding
-      // between frames keeps progress notifications from being overtaken by a
-      // response that arrived in the same chunk.
-      this.processing = this.processing.then(() => this.processLine(line));
-    }
-  }
-
-  private async processLine(line: string): Promise<void> {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch (error) {
-      this.onerror?.(error instanceof Error ? error : new Error(String(error)));
-      return;
-    }
-    if (Array.isArray(parsed)) {
-      this.onBatch?.(line);
-      return;
-    }
-    try {
-      const message = deserializeMessage(line);
-      if (isJSONRPCNotification(message)) this.onNotification?.(message);
-      this.onmessage?.(message);
-    } catch (error) {
-      this.onerror?.(error instanceof Error ? error : new Error(String(error)));
-    }
-    await Promise.resolve();
   }
 
   private finish(): void {

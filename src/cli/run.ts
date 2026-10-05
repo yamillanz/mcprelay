@@ -64,88 +64,149 @@ type ParsedRun = { ok: true; invocation: RunInvocation } | { ok: false; message:
 const RUN_USAGE =
   'Usage: mcprelay run [options] -- <server command…>  |  mcprelay run [options] --http <url>';
 
+/** One parser step: the next token index, or a precise usage error. */
+type Step = { ok: true; next: number } | { ok: false; message: string };
+
+interface OptionValue {
+  ok: true;
+  value: string;
+  next: number;
+}
+
+/** Reads the value that follows a flag; missing values share one error. */
+function readOptionValue(
+  tokens: readonly string[],
+  index: number,
+  flag: string,
+): OptionValue | { ok: false; message: string } {
+  const value = tokens[index + 1];
+  if (value === undefined) return { ok: false, message: `Missing value for '${flag}'.` };
+  return { ok: true, value, next: index + 2 };
+}
+
+interface RunOptions {
+  configPath?: string;
+  timeoutMs?: number;
+  maxAttempts?: number;
+  policyDryRun?: boolean;
+  httpUrl?: string;
+}
+
+function consumeConfigPath(tokens: readonly string[], index: number, options: RunOptions): Step {
+  const read = readOptionValue(tokens, index, '--config');
+  if (!read.ok) return read;
+  options.configPath = read.value;
+  return { ok: true, next: read.next };
+}
+
+function consumeHttpUrl(tokens: readonly string[], index: number, options: RunOptions): Step {
+  const read = readOptionValue(tokens, index, '--http');
+  if (!read.ok) return read;
+  try {
+    new URL(read.value);
+  } catch {
+    return { ok: false, message: `Invalid URL for '--http': ${read.value}` };
+  }
+  options.httpUrl = read.value;
+  return { ok: true, next: read.next };
+}
+
+function consumeIntegerOption(
+  tokens: readonly string[],
+  index: number,
+  token: string,
+  options: RunOptions,
+): Step {
+  const read = readOptionValue(tokens, index, token);
+  if (!read.ok) return read;
+  const parsed = Number(read.value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return { ok: false, message: `Invalid value for '${token}': ${read.value}` };
+  }
+  if (token === '--timeout-ms') options.timeoutMs = parsed;
+  else options.maxAttempts = parsed;
+  return { ok: true, next: read.next };
+}
+
+function consumePolicyDryRun(index: number, options: RunOptions): Step {
+  options.policyDryRun = true;
+  return { ok: true, next: index + 1 };
+}
+
+function consumeRunToken(
+  tokens: readonly string[],
+  index: number,
+  token: string,
+  options: RunOptions,
+): Step {
+  switch (token) {
+    case '--config':
+      return consumeConfigPath(tokens, index, options);
+    case '--http':
+      return consumeHttpUrl(tokens, index, options);
+    case '--timeout-ms':
+    case '--max-attempts':
+      return consumeIntegerOption(tokens, index, token, options);
+    case '--policy-dry-run':
+      return consumePolicyDryRun(index, options);
+    default:
+      return { ok: false, message: `Unknown option '${token}'.` };
+  }
+}
+
+function buildInvocation(
+  options: RunOptions,
+  target: { command?: string; args: string[] },
+): RunInvocation {
+  return {
+    ...(target.command === undefined ? {} : { command: target.command }),
+    args: target.args,
+    ...(options.httpUrl === undefined ? {} : { httpUrl: options.httpUrl }),
+    ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
+    ...(options.policyDryRun === undefined ? {} : { policyDryRun: options.policyDryRun }),
+  };
+}
+
+function finishWithHttp(options: RunOptions): ParsedRun {
+  return { ok: true, invocation: buildInvocation(options, { args: [] }) };
+}
+
+function finishWithStdio(tokens: readonly string[], index: number, options: RunOptions): ParsedRun {
+  const command = tokens[index + 1];
+  if (tokens[index] !== '--' || command === undefined) {
+    return { ok: false, message: RUN_USAGE };
+  }
+  return {
+    ok: true,
+    invocation: buildInvocation(options, { command, args: tokens.slice(index + 2) }),
+  };
+}
+
 function parseRunInvocation(tokens: readonly string[]): ParsedRun {
-  let configPath: string | undefined;
-  let timeoutMs: number | undefined;
-  let maxAttempts: number | undefined;
-  let policyDryRun: boolean | undefined;
-  let httpUrl: string | undefined;
+  const options: RunOptions = {};
   let index = 0;
 
   while (index < tokens.length) {
     const token = tokens[index];
     if (token === undefined || token === '--') break;
-    if (token === '--policy-dry-run') {
-      policyDryRun = true;
-      index += 1;
-      continue;
-    }
-    if (token === '--http') {
-      const value = tokens[index + 1];
-      if (value === undefined) return { ok: false, message: "Missing value for '--http'." };
-      try {
-        new URL(value);
-      } catch {
-        return { ok: false, message: `Invalid URL for '--http': ${value}` };
-      }
-      httpUrl = value;
-      index += 2;
-      continue;
-    }
-    if (token === '--config' || token === '--timeout-ms' || token === '--max-attempts') {
-      const value = tokens[index + 1];
-      if (value === undefined) return { ok: false, message: `Missing value for '${token}'.` };
-      if (token === '--config') {
-        configPath = value;
-      } else {
-        const parsed = Number(value);
-        if (!Number.isInteger(parsed) || parsed < 1) {
-          return { ok: false, message: `Invalid value for '${token}': ${value}` };
-        }
-        if (token === '--timeout-ms') timeoutMs = parsed;
-        else maxAttempts = parsed;
-      }
-      index += 2;
-      continue;
-    }
-    return { ok: false, message: `Unknown option '${token}'.` };
+    const step = consumeRunToken(tokens, index, token, options);
+    if (!step.ok) return { ok: false, message: step.message };
+    index = step.next;
   }
 
-  if (httpUrl !== undefined) {
+  if (options.httpUrl !== undefined) {
     if (tokens[index] === '--') {
       return {
         ok: false,
         message: "Use either '--http <url>' or '-- <server command…>', not both.",
       };
     }
-    return {
-      ok: true,
-      invocation: {
-        httpUrl,
-        args: [],
-        ...(configPath === undefined ? {} : { configPath }),
-        ...(timeoutMs === undefined ? {} : { timeoutMs }),
-        ...(maxAttempts === undefined ? {} : { maxAttempts }),
-        ...(policyDryRun === undefined ? {} : { policyDryRun }),
-      },
-    };
+    return finishWithHttp(options);
   }
 
-  if (tokens[index] !== '--' || tokens[index + 1] === undefined) {
-    return { ok: false, message: RUN_USAGE };
-  }
-
-  return {
-    ok: true,
-    invocation: {
-      command: tokens[index + 1] as string,
-      args: tokens.slice(index + 2),
-      ...(configPath === undefined ? {} : { configPath }),
-      ...(timeoutMs === undefined ? {} : { timeoutMs }),
-      ...(maxAttempts === undefined ? {} : { maxAttempts }),
-      ...(policyDryRun === undefined ? {} : { policyDryRun }),
-    },
-  };
+  return finishWithStdio(tokens, index, options);
 }
 
 function usageError(io: CliIO, message: string): number {

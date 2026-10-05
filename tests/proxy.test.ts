@@ -92,6 +92,12 @@ describe('FR-P1 — wrap any stdio server', () => {
     expect(pong.result).toEqual({});
   });
 
+  it('passes options after -- to the server command', async () => {
+    const raw = proxy(['--http', 'x']);
+    const init = await handshake(raw);
+    expect(init.result?.serverInfo).toMatchObject({ name: 'echo-server' });
+  });
+
   it('exits 2 with a hint when no server command is given', async () => {
     const raw = spawnRaw(NODE, [CLI, 'run']);
     const code = await raw.waitForExit();
