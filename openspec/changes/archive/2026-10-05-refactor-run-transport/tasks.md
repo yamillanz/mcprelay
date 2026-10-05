@@ -58,5 +58,6 @@ Scenario → test traceability: "Parser reads as named steps" / "Helpers stay co
 - [x] 5.3 Docs/diagram: none — file-local refactor alters no architecture, flow, or component; README, AGENTS status line, PRD, and the living diagram stay untouched. No `bench/` exists yet, so "No hot-path overhead added" is evidenced by inspection (no new I/O or serialization, one decoder method dispatch per frame) and the unchanged integration tests
   - `git status` confirms only `src/cli/run.ts`, `src/proxy/transports.ts`, and tests changed; real-server check: filesystem server session through the refactored proxy (`secure-filesystem-server 0.2.0`, `read_file` returned the smoke content) plus the examples-server suites
 - [x] 5.4 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-  - Approved 2026-10-05 ("approved, commit and push")
-- [ ] 5.5 Human approval to archive (rule 0); archive the change after approval
+  - Approved 2026-10-05: `069427e` refactor (+ `8bf7c63` spec) pushed to `origin/main`
+- [x] 5.5 Human approval to archive (rule 0); archive the change after approval
+  - Approved and archived 2026-10-05 as `2026-10-05-refactor-run-transport`
