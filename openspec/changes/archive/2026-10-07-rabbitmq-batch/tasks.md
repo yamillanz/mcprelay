@@ -73,5 +73,7 @@ Scenario → test traceability: "Capture is durable in the broker and listable t
   - `MCPRELAY_RABBITMQ_URL=amqp://localhost`: **18/18** (14 contract + 4 broker)
 - [x] 7.3 Real-server evidence: filesystem (stdio) and the hermetic HTTP fixture under `queue.provider: rabbitmq` — fail → DLQ in the broker → replay → audit, plus one batch run (`run --all`)
   - 2026-10-05 evidence run (`amqp://localhost`, unique `mcp.dlx.evidence.*`/`mcp.dlq.evidence.*`): stdio filesystem `write_file` isError captured (`tool_error:stdio`) and HTTP `sleep` timeout captured (`timeout:http`) → broker holds **2** captures → filesystem replay `replay ok` with the **side effect landed** (file exists with content) → batch `--all --tool sleep`: `1 selected, 1 ok, 0 failed` → broker still **2** (immutable capture) → audit: `captured` x2 + `replayed` x2
-- [ ] 7.4 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-- [ ] 7.5 Human approval to archive (rule 0); archive the change after approval
+- [x] 7.4 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
+  - Approved 2026-10-05: `a059cac` feat (+ `9dfe1ab` spec) pushed to `origin/main`
+- [x] 7.5 Human approval to archive (rule 0); archive the change after approval
+  - Approved 2026-10-05 and archived as `2026-10-07-rabbitmq-batch`
