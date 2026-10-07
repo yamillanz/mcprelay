@@ -4,11 +4,8 @@ import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import {
-  AlreadyClaimedError,
-  AlreadyResolvedError,
-  SqliteQueueProvider,
-} from '../src/queue/sqlite-queue.js';
+import { AlreadyClaimedError, AlreadyResolvedError } from '../src/queue/port.js';
+import { SqliteQueueProvider } from '../src/queue/sqlite-queue.js';
 import { newFailureRecordId, type FailureRecord } from '../src/queue/failure-record.js';
 
 const providers: SqliteQueueProvider[] = [];

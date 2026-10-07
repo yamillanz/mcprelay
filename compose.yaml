@@ -1,0 +1,21 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4-alpine
+    user: rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  demo:
+    build: .
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      MCPRELAY_RABBITMQ_URL: amqp://rabbitmq
+    volumes:
+      - mcprelay-data:/data
+
+volumes:
+  mcprelay-data:

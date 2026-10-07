@@ -42,6 +42,7 @@ export interface HealthStatus {
   ok: boolean;
   provider: string;
   path?: string;
+  queue?: string;
 }
 
 const monotonicUlid = monotonicFactory();

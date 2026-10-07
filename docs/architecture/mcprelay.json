@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "mcprelay M6 — stdio or HTTP upstreams on one pipeline",
+    "title": "mcprelay M7 \u2014 pluggable DLQ (SQLite \u00b7 RabbitMQ) on one pipeline",
     "output": "mcprelay.html",
     "quality_profile": "showcase",
     "viewBox": [
@@ -15,7 +15,7 @@
       "id": "client",
       "type": "external",
       "label": "MCP Client",
-      "sublabel": "Claude · OpenCode · agent",
+      "sublabel": "Claude \u00b7 OpenCode \u00b7 agent",
       "pos": [
         20,
         190
@@ -60,7 +60,7 @@
       "type": "backend",
       "label": "Bridge",
       "sublabel": "tools/call interception",
-      "tag": "correlation_id · session",
+      "tag": "correlation_id \u00b7 session",
       "pos": [
         518,
         190
@@ -74,8 +74,8 @@
       "id": "policy-engine",
       "type": "security",
       "label": "Policy engine",
-      "sublabel": "tool · caller · args rules",
-      "tag": "deny → audit · no DLQ",
+      "sublabel": "tool \u00b7 caller \u00b7 args rules",
+      "tag": "deny \u2192 audit \u00b7 no DLQ",
       "pos": [
         694,
         190
@@ -89,8 +89,8 @@
       "id": "retry-pipeline",
       "type": "backend",
       "label": "Retry pipeline",
-      "sublabel": "classify · backoff · bounds",
-      "tag": "timeout · config-driven",
+      "sublabel": "classify \u00b7 backoff \u00b7 bounds",
+      "tag": "timeout \u00b7 config-driven",
       "pos": [
         870,
         190
@@ -119,7 +119,7 @@
       "id": "upstream-transport",
       "type": "backend",
       "label": "Upstream transport",
-      "sublabel": "spawn stdio · streamable HTTP",
+      "sublabel": "spawn stdio \u00b7 streamable HTTP",
       "pos": [
         1046,
         330
@@ -133,7 +133,7 @@
       "id": "server",
       "type": "external",
       "label": "MCP Server",
-      "sublabel": "local stdio · remote HTTP",
+      "sublabel": "local stdio \u00b7 remote HTTP",
       "pos": [
         1046,
         450
@@ -147,8 +147,8 @@
       "id": "persistence",
       "type": "database",
       "label": "DLQ + Store",
-      "sublabel": "queue.db + history.db",
-      "tag": "WAL · redaction · server.transport",
+      "sublabel": "sqlite | rabbitmq dlx",
+      "tag": "replay index \u00b7 confirms \u00b7 redaction",
       "pos": [
         694,
         60
@@ -177,8 +177,8 @@
       "id": "replay-cli",
       "type": "backend",
       "label": "Replay CLI",
-      "sublabel": "run · --dry-run · --force",
-      "tag": "claim · dedup",
+      "sublabel": "run \u00b7 --dry-run \u00b7 --force",
+      "tag": "claim \u00b7 dedup",
       "pos": [
         870,
         60
@@ -192,7 +192,7 @@
   "boundaries": [
     {
       "kind": "region",
-      "label": "mcprelay process — 1:1 wrap",
+      "label": "mcprelay process \u2014 1:1 wrap",
       "wraps": [
         "client-transport",
         "serve-stdio",
@@ -209,7 +209,7 @@
     },
     {
       "kind": "region",
-      "label": "upstream server — spawned or remote",
+      "label": "upstream server \u2014 spawned or remote",
       "wraps": [
         "server",
         "replay-cli"
@@ -314,7 +314,7 @@
       "id": "server-to-client",
       "from": "upstream-client",
       "to": "serve-stdio",
-      "label": "sampling · elicitation · roots",
+      "label": "sampling \u00b7 elicitation \u00b7 roots",
       "variant": "dashed",
       "fromSide": "top",
       "toSide": "top",

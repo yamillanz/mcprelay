@@ -115,7 +115,7 @@ describe('mcprelay replay database errors', () => {
     writeFileSync(configPath, `queue:\n  provider: sqlite\n  sqlite:\n    path: ${dir}\n`, 'utf8');
     const raw = run(['replay', 'list', '--config', configPath]);
     expect(await raw.waitForExit()).toBe(1);
-    expect(raw.stderr()).toContain('cannot open queue database');
+    expect(raw.stderr()).toContain('cannot open the queue provider');
   });
 });
 

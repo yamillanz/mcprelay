@@ -1,8 +1,8 @@
-import { loadConfig } from '../config/config.js';
+import { loadConfig, type McprelayConfig } from '../config/config.js';
 import { EXIT_FAILURE, EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
 import type { FailureFilter, FailureRecord, ReplayStatus } from '../queue/failure-record.js';
-import { SqliteQueueProvider } from '../queue/sqlite-queue.js';
-import { runReplayRecord, type ReplayRunOptions } from './replay-run.js';
+import { createPersistence, type Persistence } from '../queue/providers.js';
+import { runReplayBatch, runReplayRecord, type ReplayRunOptions } from './replay-run.js';
 
 export interface ReplayIO {
   stdout(text: string): void;
@@ -13,7 +13,7 @@ const REPLAY_USAGE =
   'Usage: mcprelay replay <list|inspect|run> [options]\n' +
   '  list:    [--config <path>] [--json] [--status <s>] [--tool <name>] [--correlation-id <id>] [--since <iso>] [--until <iso>] [--limit <n>]\n' +
   '  inspect: <id> [--config <path>] [--json]\n' +
-  '  run:     <id> [--dry-run] [--force] [--set key=value]… [--config <path>] [--json]';
+  '  run:     <id> | --all [--tool <name>] [--correlation-id <id>] [--since <iso>] [--until <iso>] [--limit <n>] [--dry-run] [--force] [--set key=value]… [--config <path>] [--json]';
 
 const REPLAY_STATUSES: readonly ReplayStatus[] = ['pending', 'replayed', 'discarded'];
 
@@ -66,14 +66,14 @@ function consumeFilterOption(
   tokens: readonly string[],
   index: number,
   token: string,
-  options: ReplayOptions,
+  target: { filter: FailureFilter },
 ): Step {
   const read = readOptionValue(tokens, index, token);
   if (!read.ok) return read;
-  if (token === '--tool') options.filter.tool = read.value;
-  if (token === '--correlation-id') options.filter.correlationId = read.value;
-  if (token === '--since') options.filter.since = read.value;
-  if (token === '--until') options.filter.until = read.value;
+  if (token === '--tool') target.filter.tool = read.value;
+  if (token === '--correlation-id') target.filter.correlationId = read.value;
+  if (token === '--since') target.filter.since = read.value;
+  if (token === '--until') target.filter.until = read.value;
   return { ok: true, next: read.next };
 }
 
@@ -88,14 +88,18 @@ function consumeStatus(tokens: readonly string[], index: number, options: Replay
 }
 
 /** `--limit` reports the invalid value, not the shared missing-value error. */
-function consumeLimit(tokens: readonly string[], index: number, options: ReplayOptions): Step {
+function consumeLimit(
+  tokens: readonly string[],
+  index: number,
+  target: { filter: FailureFilter },
+): Step {
   const read = readOptionValue(tokens, index, '--limit');
   const raw = read.ok ? read.value : undefined;
   const limit = raw === undefined ? Number.NaN : Number(raw);
   if (!Number.isInteger(limit) || limit < 1) {
     return { ok: false, message: `Invalid value for '--limit': ${String(raw)}` };
   }
-  options.filter.limit = limit;
+  target.filter.limit = limit;
   return { ok: true, next: index + 2 };
 }
 
@@ -204,6 +208,7 @@ function consumeSetOverride(
 }
 
 function consumeBooleanFlag(token: string, index: number, options: ReplayRunOptions): Step {
+  if (token === '--all') options.all = true;
   if (token === '--dry-run') options.dryRun = true;
   if (token === '--force') options.force = true;
   if (token === '--json') options.json = true;
@@ -230,6 +235,14 @@ function consumeRunToken(
       return consumeConfigPath(tokens, index, options);
     case '--set':
       return consumeSetOverride(tokens, index, options);
+    case '--tool':
+    case '--correlation-id':
+    case '--since':
+    case '--until':
+      return consumeFilterOption(tokens, index, token, options);
+    case '--limit':
+      return consumeLimit(tokens, index, options);
+    case '--all':
     case '--dry-run':
     case '--force':
     case '--json':
@@ -242,6 +255,8 @@ function consumeRunToken(
 function parseRunTokens(tokens: readonly string[]): ParsedRun {
   const options: ReplayRunOptions = {
     id: '',
+    all: false,
+    filter: {},
     dryRun: false,
     force: false,
     overrides: {},
@@ -256,6 +271,19 @@ function parseRunTokens(tokens: readonly string[]): ParsedRun {
     index = step.next;
   }
 
+  if (options.all) {
+    if (options.id !== '') {
+      return { ok: false, message: "Use either <id> or '--all', not both." };
+    }
+    if (Object.keys(options.overrides).length > 0) {
+      return {
+        ok: false,
+        message: "'--set' is not supported with '--all'; replay records individually.",
+      };
+    }
+    return { ok: true, options };
+  }
+
   if (options.id === '') {
     return { ok: false, message: 'Missing record id. Usage: mcprelay replay run <id>' };
   }
@@ -267,12 +295,14 @@ function usageError(io: ReplayIO, message: string): number {
   return EXIT_USAGE;
 }
 
-function openQueue(path: string, io: ReplayIO): SqliteQueueProvider | undefined {
+function openQueue(config: McprelayConfig, io: ReplayIO): Persistence | undefined {
   try {
-    return new SqliteQueueProvider({ path });
+    const persistence = createPersistence(config);
+    persistence.getQueue();
+    return persistence;
   } catch (error) {
     io.stderr(
-      `mcprelay: cannot open queue database at '${path}': ${error instanceof Error ? error.message : String(error)}\n` +
+      `mcprelay: cannot open the queue provider: ${error instanceof Error ? error.message : String(error)}\n` +
         "mcprelay: if better-sqlite3's native binary is missing, run `npm rebuild better-sqlite3 --ignore-scripts=false`\n",
     );
     return undefined;
@@ -285,7 +315,9 @@ export async function runReplay(tokens: readonly string[], io: ReplayIO): Promis
   if (subcommand === 'run') {
     const parsed = parseRunTokens(tokens.slice(1));
     if (!parsed.ok) return usageError(io, parsed.message);
-    return runReplayRecord(parsed.options, io);
+    return parsed.options.all
+      ? runReplayBatch(parsed.options, io)
+      : runReplayRecord(parsed.options, io);
   }
   if (subcommand !== 'list' && subcommand !== 'inspect') {
     return usageError(
@@ -300,18 +332,18 @@ export async function runReplay(tokens: readonly string[], io: ReplayIO): Promis
   if (!parsed.ok) return usageError(io, parsed.message);
   const { configPath, json, id, filter } = parsed.options;
 
-  let queuePath: string;
+  let config: McprelayConfig;
   try {
-    const config = loadConfig(configPath === undefined ? {} : { path: configPath });
+    config = loadConfig(configPath === undefined ? {} : { path: configPath });
     for (const warning of config.warnings) io.stderr(`mcprelay: warning: ${warning}\n`);
-    queuePath = config.queue.sqlite.path;
   } catch (error) {
     io.stderr(`mcprelay: ${error instanceof Error ? error.message : String(error)}\n`);
     return EXIT_USAGE;
   }
 
-  const provider = openQueue(queuePath, io);
-  if (provider === undefined) return EXIT_FAILURE;
+  const persistence = openQueue(config, io);
+  if (persistence === undefined) return EXIT_FAILURE;
+  const provider = persistence.getQueue();
   try {
     if (subcommand === 'list') {
       const records = await provider.list(filter);
@@ -334,6 +366,6 @@ export async function runReplay(tokens: readonly string[], io: ReplayIO): Promis
     io.stderr(`mcprelay: ${error instanceof Error ? error.message : String(error)}\n`);
     return EXIT_FAILURE;
   } finally {
-    provider.close();
+    await persistence.close();
   }
 }

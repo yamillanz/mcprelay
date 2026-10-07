@@ -1,6 +1,6 @@
 import { loadConfig, type McprelayConfig } from '../config/config.js';
 import { EXIT_FAILURE, EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
-import { SqliteQueueProvider } from '../queue/sqlite-queue.js';
+import { createPersistence, type Persistence } from '../queue/providers.js';
 import { evaluateCall, type PolicyDecision } from './policy.js';
 
 export interface PolicyIO {
@@ -87,24 +87,25 @@ async function loadStoredCall(
   id: string,
   io: PolicyIO,
 ): Promise<{ tool: string; arguments: unknown } | undefined> {
-  let provider: SqliteQueueProvider;
+  let persistence: Persistence;
   try {
-    provider = new SqliteQueueProvider({ path: config.queue.sqlite.path });
+    persistence = createPersistence(config);
+    persistence.getQueue();
   } catch (error) {
     io.stderr(
-      `mcprelay: cannot open queue database at '${config.queue.sqlite.path}': ${error instanceof Error ? error.message : String(error)}\n`,
+      `mcprelay: cannot open the queue provider: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     return undefined;
   }
   try {
-    const record = await provider.get(id);
+    const record = await persistence.getQueue().get(id);
     if (record === null) {
       io.stderr(`mcprelay: failure record '${id}' not found\n`);
       return undefined;
     }
     return { tool: record.tool.name, arguments: record.tool.arguments };
   } finally {
-    provider.close();
+    await persistence.close();
   }
 }
 

@@ -326,6 +326,6 @@ describe('replay run: guards', () => {
     const codes = [firstCode, secondCode].sort();
     expect(codes).toEqual([0, 1]);
     const loser = firstCode === 1 ? first : second;
-    expect(loser.stderr()).toMatch(/claim/i);
+    expect(loser.stderr()).toMatch(/claim|already resolved/i);
   });
 });

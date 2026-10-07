@@ -46,9 +46,16 @@ export interface ReliabilityConfig {
   perTool: Record<string, ToolOverride>;
 }
 
+export interface RabbitMqConfig {
+  url: string;
+  exchange: string;
+  queue: string;
+}
+
 export interface QueueConfig {
-  provider: 'sqlite';
+  provider: 'sqlite' | 'rabbitmq';
   sqlite: { path: string };
+  rabbitmq: RabbitMqConfig;
 }
 
 export interface StoreConfig {
@@ -106,7 +113,9 @@ const PER_TOOL_KEYS = new Set([
   'retry',
   'capture_tool_errors',
 ]);
-const QUEUE_KEYS = new Set(['provider', 'sqlite']);
+const QUEUE_KEYS = new Set(['provider', 'sqlite', 'rabbitmq']);
+const STORE_KEYS = new Set(['provider', 'sqlite']);
+const RABBITMQ_KEYS = new Set(['url', 'exchange', 'queue']);
 const SQLITE_KEYS = new Set(['path']);
 const REDACTION_KEYS = new Set(['patterns']);
 
@@ -119,7 +128,11 @@ export function defaultConfig(): McprelayConfig {
       idempotentDefault: false,
       perTool: {},
     },
-    queue: { provider: 'sqlite', sqlite: { path: './.mcprelay/queue.db' } },
+    queue: {
+      provider: 'sqlite',
+      sqlite: { path: './.mcprelay/queue.db' },
+      rabbitmq: { url: 'amqp://localhost', exchange: 'mcp.dlx', queue: 'mcp.dlq' },
+    },
     store: { provider: 'sqlite', sqlite: { path: './.mcprelay/history.db' } },
     redaction: { patterns: [...DEFAULT_REDACTION_PATTERNS] },
     policy: defaultPolicyConfig(),
@@ -339,13 +352,27 @@ const TOP_LEVEL_KEYS = new Set([
   'upstream',
 ]);
 
+function applySqlitePath(target: { path: string }, raw: unknown, label: string): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
+  assertKnownKeys(raw, SQLITE_KEYS, label);
+  if ('path' in raw) {
+    if (typeof raw.path !== 'string' || raw.path.length === 0) {
+      throw new ConfigError(
+        `${label}.path: expected a non-empty string, got ${JSON.stringify(raw.path)}`,
+      );
+    }
+    target.path = raw.path;
+  }
+}
+
 function applySqliteSection(
   target: { provider: 'sqlite'; sqlite: { path: string } },
   raw: unknown,
   label: string,
+  allowedKeys: Set<string>,
 ): void {
   if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
-  assertKnownKeys(raw, QUEUE_KEYS, label);
+  assertKnownKeys(raw, allowedKeys, label);
 
   if ('provider' in raw) {
     if (raw.provider !== 'sqlite') {
@@ -355,19 +382,60 @@ function applySqliteSection(
     }
     target.provider = 'sqlite';
   }
-  if ('sqlite' in raw) {
-    const sqlite = raw.sqlite;
-    if (!isRecord(sqlite)) throw new ConfigError(`${label}.sqlite: expected a mapping`);
-    assertKnownKeys(sqlite, SQLITE_KEYS, `${label}.sqlite`);
-    if ('path' in sqlite) {
-      if (typeof sqlite.path !== 'string' || sqlite.path.length === 0) {
-        throw new ConfigError(
-          `${label}.sqlite.path: expected a non-empty string, got ${JSON.stringify(sqlite.path)}`,
-        );
-      }
-      target.sqlite.path = sqlite.path;
-    }
+  if ('sqlite' in raw) applySqlitePath(target.sqlite, raw.sqlite, `${label}.sqlite`);
+}
+
+function isAmqpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'amqp:' || url.protocol === 'amqps:';
+  } catch {
+    return false;
   }
+}
+
+function applyRabbitMqSection(
+  target: { url: string; exchange: string; queue: string },
+  raw: unknown,
+  label: string,
+): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
+  assertKnownKeys(raw, RABBITMQ_KEYS, label);
+  if ('url' in raw) {
+    const url = raw.url;
+    if (typeof url !== 'string' || !isAmqpUrl(url)) {
+      throw new ConfigError(`${label}.url: expected an amqp:// or amqps:// URL`);
+    }
+    target.url = url;
+  }
+  if ('exchange' in raw) {
+    if (typeof raw.exchange !== 'string' || raw.exchange.length === 0) {
+      throw new ConfigError(`${label}.exchange: expected a non-empty string`);
+    }
+    target.exchange = raw.exchange;
+  }
+  if ('queue' in raw) {
+    if (typeof raw.queue !== 'string' || raw.queue.length === 0) {
+      throw new ConfigError(`${label}.queue: expected a non-empty string`);
+    }
+    target.queue = raw.queue;
+  }
+}
+
+function applyQueueSection(target: QueueConfig, raw: unknown, label: string): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
+  assertKnownKeys(raw, QUEUE_KEYS, label);
+
+  if ('provider' in raw) {
+    if (raw.provider !== 'sqlite' && raw.provider !== 'rabbitmq') {
+      throw new ConfigError(
+        `${label}.provider: expected 'sqlite' or 'rabbitmq', got ${JSON.stringify(raw.provider)}`,
+      );
+    }
+    target.provider = raw.provider;
+  }
+  if ('sqlite' in raw) applySqlitePath(target.sqlite, raw.sqlite, `${label}.sqlite`);
+  if ('rabbitmq' in raw) applyRabbitMqSection(target.rabbitmq, raw.rabbitmq, `${label}.rabbitmq`);
 }
 
 function applyRedaction(config: McprelayConfig, raw: unknown, label: string): void {
@@ -433,8 +501,10 @@ function applyConfigDocument(
     }
   }
   if ('reliability' in document) applyReliability(config, document.reliability, path);
-  if ('queue' in document) applySqliteSection(config.queue, document.queue, `${path}: queue`);
-  if ('store' in document) applySqliteSection(config.store, document.store, `${path}: store`);
+  if ('queue' in document) applyQueueSection(config.queue, document.queue, `${path}: queue`);
+  if ('store' in document) {
+    applySqliteSection(config.store, document.store, `${path}: store`, STORE_KEYS);
+  }
   if ('redaction' in document) applyRedaction(config, document.redaction, `${path}: redaction`);
   if ('policy' in document) applyPolicy(config, document.policy, `${path}: policy`);
   if ('upstream' in document) applyUpstream(config, document.upstream, `${path}: upstream`);

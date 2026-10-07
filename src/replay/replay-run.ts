@@ -3,11 +3,12 @@ import { Client } from '@modelcontextprotocol/client';
 import { loadConfig, resolveToolPolicy, type McprelayConfig } from '../config/config.js';
 import { EXIT_FAILURE, EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
 import { extractIdempotencyKey } from '../pipeline/idempotency.js';
-import type { FailureRecord } from '../queue/failure-record.js';
-import { RecordNotFoundError, SqliteQueueProvider } from '../queue/sqlite-queue.js';
-import { redactDeep } from '../redaction/redact.js';
+import type { FailureFilter, FailureRecord } from '../queue/failure-record.js';
+import { RecordNotFoundError, type IdempotencyIndex, type QueueProvider } from '../queue/port.js';
+import { createPersistence } from '../queue/providers.js';
 import { HttpUpstreamLink, StdioUpstreamLink, type UpstreamLink } from '../proxy/transports.js';
-import { SqliteStore } from '../store/sqlite-store.js';
+import { redactDeep } from '../redaction/redact.js';
+import type { Store } from '../store/sqlite-store.js';
 import { packageVersion } from '../version.js';
 import { parseCommandLine } from './command-line.js';
 import { applyOverrides, dedupVerdict, type DedupVerdict } from './guards.js';
@@ -19,6 +20,8 @@ export interface ReplayRunIO {
 
 export interface ReplayRunOptions {
   id: string;
+  all: boolean;
+  filter: FailureFilter;
   dryRun: boolean;
   force: boolean;
   overrides: Record<string, string>;
@@ -36,9 +39,12 @@ interface RunOutcome {
 type ReplayAttempt =
   { kind: 'unreachable'; message: string } | { kind: 'executed'; outcome: RunOutcome };
 
+type Queue = QueueProvider & IdempotencyIndex;
+
 interface Providers {
-  queue: SqliteQueueProvider;
-  store: SqliteStore;
+  queue: Queue;
+  store: Store;
+  close(): Promise<void>;
 }
 
 interface CallIdentity {
@@ -72,20 +78,20 @@ function loadReplayConfig(options: ReplayRunOptions, io: ReplayRunIO): McprelayC
 
 function openProviders(config: McprelayConfig, io: ReplayRunIO): Providers | undefined {
   try {
-    return {
-      queue: new SqliteQueueProvider({ path: config.queue.sqlite.path }),
-      store: new SqliteStore({ path: config.store.sqlite.path }),
-    };
+    const persistence = createPersistence(config);
+    const queue = persistence.getQueue();
+    const store = persistence.getStore();
+    return { queue, store, close: () => persistence.close() };
   } catch (error) {
     io.stderr(
-      `mcprelay: cannot open the queue/store databases: ${error instanceof Error ? error.message : String(error)}\n`,
+      `mcprelay: cannot open the queue/store: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     return undefined;
   }
 }
 
 async function fetchRecord(
-  queue: SqliteQueueProvider,
+  queue: Queue,
   id: string,
   io: ReplayRunIO,
 ): Promise<FailureRecord | undefined> {
@@ -104,7 +110,7 @@ function resolveArguments(
 }
 
 async function computeDedupVerdict(
-  queue: SqliteQueueProvider,
+  queue: Queue,
   config: McprelayConfig,
   record: FailureRecord,
   key: string | undefined,
@@ -145,7 +151,7 @@ function guardRun(deps: {
 }
 
 async function claimOrReport(
-  queue: SqliteQueueProvider,
+  queue: Queue,
   record: FailureRecord,
   io: ReplayRunIO,
 ): Promise<boolean> {
@@ -429,7 +435,114 @@ export async function runReplayRecord(options: ReplayRunOptions, io: ReplayRunIO
     }
     return reportOutcome(io, record, attempt, options.json);
   } finally {
-    providers.queue.close();
-    providers.store.close();
+    await providers.close();
+  }
+}
+
+interface BatchRecordResult {
+  id: string;
+  status: 'ok' | 'failed' | 'skipped';
+  error?: string;
+}
+
+/** One record inside a batch: the same guards, claim, attempt, and persist as a single run. */
+async function replayBatchRecord(
+  providers: Providers,
+  config: McprelayConfig,
+  record: FailureRecord,
+  options: ReplayRunOptions,
+  io: ReplayRunIO,
+): Promise<BatchRecordResult> {
+  const storedArguments = (record.tool.arguments ?? {}) as Record<string, unknown>;
+  const key = extractIdempotencyKey({ arguments: storedArguments });
+  const identity: CallIdentity = {
+    ...(key === undefined ? {} : { key }),
+    argumentsHash: record.tool.arguments_hash,
+  };
+  const { replayArguments, remainingMarkers } = resolveArguments(record, options.overrides);
+  const verdict = await computeDedupVerdict(providers.queue, config, record, key);
+
+  if (options.dryRun) {
+    const code = await runDryRun({
+      io,
+      config,
+      record,
+      replayArguments,
+      remainingMarkers,
+      verdict,
+      json: false,
+    });
+    return code === EXIT_OK
+      ? { id: record.id, status: 'ok' }
+      : { id: record.id, status: 'failed', error: 'dry-run inspection failed' };
+  }
+
+  const refusal = guardRun({ remainingMarkers, verdict, force: options.force, io });
+  if (refusal !== undefined) return { id: record.id, status: 'skipped', error: 'guard refused' };
+
+  if (!(await claimOrReport(providers.queue, record, io))) {
+    return { id: record.id, status: 'skipped', error: 'claimed by another replay' };
+  }
+
+  const attempt = await attemptReplay(config, record, replayArguments);
+  await persistOutcome(providers, record, attempt, identity);
+  if (attempt.kind === 'unreachable') {
+    return { id: record.id, status: 'failed', error: attempt.message };
+  }
+  if (attempt.outcome.ok) return { id: record.id, status: 'ok' };
+  return { id: record.id, status: 'failed', error: attempt.outcome.error ?? 'unknown error' };
+}
+
+/**
+ * `mcprelay replay run --all`: sequentially redrives the pending records that
+ * match the filter, reporting per-record outcomes and a summary.
+ */
+export async function runReplayBatch(options: ReplayRunOptions, io: ReplayRunIO): Promise<number> {
+  const config = loadReplayConfig(options, io);
+  if (config === undefined) return EXIT_USAGE;
+
+  const providers = openProviders(config, io);
+  if (providers === undefined) return EXIT_FAILURE;
+
+  try {
+    let records: FailureRecord[];
+    try {
+      records = await providers.queue.list({ ...options.filter, status: 'pending' });
+    } catch (error) {
+      io.stderr(`mcprelay: ${error instanceof Error ? error.message : String(error)}\n`);
+      return EXIT_FAILURE;
+    }
+
+    const results: BatchRecordResult[] = [];
+    for (const record of records) {
+      const result = await replayBatchRecord(providers, config, record, options, io);
+      results.push(result);
+      if (!options.json) {
+        if (result.status === 'ok') io.stdout(`replay ok: ${record.id}\n`);
+        else if (result.status === 'failed') {
+          io.stderr(`replay failed: ${record.id}: ${result.error ?? 'unknown error'}\n`);
+        } else {
+          io.stderr(`replay skipped: ${record.id}: ${result.error ?? 'skipped'}\n`);
+        }
+      }
+    }
+
+    const summary = {
+      all: true,
+      selected: records.length,
+      ok: results.filter((result) => result.status === 'ok').length,
+      failed: results.filter((result) => result.status === 'failed').length,
+      skipped: results.filter((result) => result.status === 'skipped').length,
+    };
+    if (options.json) {
+      io.stdout(`${JSON.stringify({ ...summary, records: results })}\n`);
+    } else {
+      io.stdout(
+        `replay --all: ${summary.selected} selected, ${summary.ok} ok, ${summary.failed} failed, ${summary.skipped} skipped\n`,
+      );
+    }
+    return summary.failed > 0 || summary.skipped > 0 ? EXIT_FAILURE : EXIT_OK;
+  } finally {
+    await providers.close();
   }
 }

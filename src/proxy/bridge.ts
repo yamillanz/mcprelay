@@ -681,7 +681,7 @@ async function closeBridge(deps: CloseBridgeDeps): Promise<void> {
   await deps.upstream.close().catch(() => {});
   await deps.handle.close().catch(() => {});
   await deps.clientTransport.close();
-  deps.persistence.close();
+  await deps.persistence.close();
 }
 
 /**

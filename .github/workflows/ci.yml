@@ -36,3 +36,30 @@ jobs:
         run: node dist/cli/index.js --version
       - name: OpenSpec validate
         run: npm run spec:validate
+
+  rabbitmq:
+    name: rabbitmq adapter (node 22)
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:4-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build:examples
+      - name: Broker contract + adapter suites
+        env:
+          MCPRELAY_RABBITMQ_URL: amqp://localhost
+        run: npx vitest run tests/queue-contract.test.ts tests/rabbitmq-queue.test.ts

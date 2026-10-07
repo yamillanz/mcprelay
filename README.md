@@ -2,7 +2,7 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M6 — HTTP upstreams.** Wrap any stdio server **or a remote Streamable HTTP server** with the same pipeline: per-call timeouts and classified retries, declarative allow/deny policy (with dry-run), a durable, redacted dead-letter queue, and **replay as redrive for side effects** — with an idempotency guard against duplicates. Per-tool metrics land in a later milestone ([`docs/PRD.md`](docs/PRD.md) §12).
+> **Status: M7 — RabbitMQ + batch replay.** Wrap any stdio server **or a remote Streamable HTTP server** with the same pipeline: per-call timeouts and classified retries, declarative allow/deny policy (with dry-run), a durable, redacted dead-letter queue, and **replay as redrive for side effects** — now including **batch replay (`run --all`)** — with an idempotency guard against duplicates. The DLQ runs on SQLite by default or on a real **RabbitMQ** broker (`docker compose up` demo). Per-tool metrics land in a later milestone ([`docs/PRD.md`](docs/PRD.md) §12).
 >
 > Published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare `mcprelay` name is blocked by npm's name-similarity policy; scoped fallback per PRD §11 — the installed command is still `mcprelay`).
 
@@ -100,8 +100,9 @@ Policy, retries, DLQ capture, and replay work identically over HTTP, and records
 - **Protocol fidelity** — everything except `tools/call` passes through semantically unchanged: `tools/list`, `resources/*`, `prompts/*`, `completion/*`, `logging/setLevel`, server→client requests (`sampling/createMessage`, `elicitation/create`, `roots/list`), progress, custom methods, and JSON-RPC batch frames.
 - **Policy without surprises** — declarative allow/deny by tool (globs), caller identity, and argument matchers (`equals`, `in`, `prefix`, `regex`, `max_length`, numeric bounds), with most-specific-wins precedence. Denied calls get a standard MCP error (`-32001`), an audit entry, and a log line — and are never forwarded upstream or written to the DLQ. `tools/list` is never filtered. `--policy-dry-run` reports decisions without enforcing; `mcprelay policy test` evaluates a call (or a stored failure) before you enforce anything.
 - **Timeout + classified retries** — per-call timeout; transient failures retry with exponential backoff, gated by the failure-class taxonomy: timeouts and upstream errors retry only for tools marked `idempotent: true`; `isError` and protocol errors never retry; client cancellation aborts without retrying.
-- **Dead-letter queue** — a call that ultimately fails is written to SQLite **before** the client sees the error, with redacted arguments, a sha256 hash of the raw arguments, failure class, attempts, and correlation id. Records survive restarts.
+- **Dead-letter queue** — a call that ultimately fails is written to the configured queue provider **before** the client sees the error, with redacted arguments, a sha256 hash of the raw arguments, failure class, attempts, and correlation id. Records survive restarts. SQLite is the zero-infra default; **RabbitMQ** (`queue.provider: rabbitmq`) publishes persistent, confirm-acknowledged captures to a durable `mcp.dlx`/`mcp.dlq` topology.
 - **Replay as redrive** — `mcprelay replay run <id>` re-executes the stored call, and the replay's own (redacted) result or error is captured into the audit trail. `--dry-run` inspects with zero upstream `tools/call`.
+- **Batch replay** — `mcprelay replay run --all` redrives every pending record matching the `list` filters, sequentially and concurrently safe through atomic claims, with per-record outcomes, a summary, and CI-meaningful exit codes.
 - **Duplicate guard** — successful keyed calls are indexed; replay refuses a duplicate within `reliability.replay.dedup_window` unless `--force` is given.
 - **Structured logs** — one JSON line per intercepted call on stderr with correlation id, latency, payload sizes, attempts, and decision.
 
@@ -124,9 +125,29 @@ mcprelay replay inspect <id>                  # full record (redacted arguments)
 mcprelay replay run <id> --dry-run            # tool present? duplicate risk? zero side effects
 mcprelay replay run <id>                      # re-execute; result captured in the audit trail
 mcprelay replay run <id> --force              # allow a duplicate within the dedup window
+mcprelay replay run --all                     # batch: redrive every pending record
+mcprelay replay run --all --tool fs/write_file --since 2026-10-01T00:00:00Z
+mcprelay replay run --all --dry-run           # inspect each record, zero side effects
 ```
 
 The `replay` CLI and the middleware share the SQLite files (WAL + busy_timeout) and never start a server unless a replay actually runs.
+
+### RabbitMQ provider
+
+```yaml
+queue:
+  provider: rabbitmq
+  rabbitmq: { url: amqp://localhost, exchange: mcp.dlx, queue: mcp.dlq }
+  sqlite: { path: ./.mcprelay/queue.db } # local replay index (list/get/claim)
+```
+
+Captures are published persistently and confirmed before the client sees the error; the broker holds the immutable capture. The replay CLI reads the **local index**, so filters, atomic resolve, claims, and dedup behave exactly as with SQLite — and if the broker is unreachable the capture still lands locally with a visible warning. Nothing is lost; a broker outage degrades, it never drops records.
+
+One-command demo — RabbitMQ + middleware + example server, ending on a successful replay:
+
+```sh
+docker compose up --build     # fail → DLQ (visible in mcp.dlq) → replay → "demo: OK"
+```
 
 ## Policy
 
@@ -177,8 +198,9 @@ reliability:
     flaky_search: { effects: read }
 
 queue:
-  provider: sqlite
-  sqlite: { path: ./.mcprelay/queue.db }
+  provider: sqlite # sqlite | rabbitmq
+  sqlite: { path: ./.mcprelay/queue.db } # with rabbitmq: the local replay index
+  rabbitmq: { url: amqp://localhost, exchange: mcp.dlx, queue: mcp.dlq }
 store:
   provider: sqlite
   sqlite: { path: ./.mcprelay/history.db }
@@ -207,7 +229,15 @@ npm run format:check
 npm run build
 ```
 
-Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics, 0006 policy engine, 0007 HTTP transport); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
+The RabbitMQ contract and broker suites skip with a notice unless a broker is reachable; run them against a local broker (CI does the same with a service container):
+
+```sh
+docker run -d --name mcprelay-rabbit -p 5672:5672 rabbitmq:4-alpine
+# if the container exits on an .erlang.cookie eacces error, add --user rabbitmq
+MCPRELAY_RABBITMQ_URL=amqp://localhost npx vitest run
+```
+
+Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics, 0006 policy engine, 0007 HTTP transport, 0008 RabbitMQ adapter); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
 
 ## License
 

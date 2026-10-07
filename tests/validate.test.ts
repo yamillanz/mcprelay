@@ -60,4 +60,18 @@ describe('mcprelay validate', () => {
     expect(await raw.waitForExit()).toBe(2);
     expect(raw.stderr()).toContain('/tmp/does-not-exist-mcprelay.yaml');
   });
+
+  it('validates a rabbitmq provider offline, without a broker', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcprelay-validate-'));
+    const configPath = join(dir, 'mcprelay.config.yaml');
+    writeFileSync(
+      configPath,
+      'queue:\n  provider: rabbitmq\n  rabbitmq:\n    url: amqp://localhost\n',
+      'utf8',
+    );
+
+    const raw = run(['validate', '--config', configPath]);
+    expect(await raw.nextLine()).toContain('config ok');
+    expect(await raw.waitForExit()).toBe(0);
+  });
 });

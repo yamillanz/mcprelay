@@ -143,7 +143,11 @@ reliability:
 describe('queue, store, and redaction sections', () => {
   it('provides safe defaults', () => {
     const config = defaultConfig();
-    expect(config.queue).toEqual({ provider: 'sqlite', sqlite: { path: './.mcprelay/queue.db' } });
+    expect(config.queue).toEqual({
+      provider: 'sqlite',
+      sqlite: { path: './.mcprelay/queue.db' },
+      rabbitmq: { url: 'amqp://localhost', exchange: 'mcp.dlx', queue: 'mcp.dlq' },
+    });
     expect(config.store).toEqual({
       provider: 'sqlite',
       sqlite: { path: './.mcprelay/history.db' },
@@ -302,5 +306,55 @@ describe('replay dedup window', () => {
   it('rejects unknown keys inside replay', () => {
     const path = writeConfig('reliability:\n  replay:\n    window: 1h\n');
     expect(() => loadConfig({ path })).toThrowError(/reliability\.replay\.window/);
+  });
+});
+
+describe('RabbitMQ queue configuration', () => {
+  it('defaults the rabbitmq section when the provider is rabbitmq', () => {
+    const path = writeConfig('queue:\n  provider: rabbitmq\n');
+    const config = loadConfig({ path });
+    expect(config.queue.provider).toBe('rabbitmq');
+    expect(config.queue.rabbitmq).toEqual({
+      url: 'amqp://localhost',
+      exchange: 'mcp.dlx',
+      queue: 'mcp.dlq',
+    });
+  });
+
+  it('applies rabbitmq file overrides', () => {
+    const path = writeConfig(`
+queue:
+  provider: rabbitmq
+  rabbitmq:
+    url: amqps://broker.example:5671
+    exchange: custom.dlx
+    queue: custom.dlq
+`);
+    const config = loadConfig({ path });
+    expect(config.queue.rabbitmq).toEqual({
+      url: 'amqps://broker.example:5671',
+      exchange: 'custom.dlx',
+      queue: 'custom.dlq',
+    });
+  });
+
+  it('rejects an invalid rabbitmq URL without echoing the value', () => {
+    const path = writeConfig('queue:\n  provider: rabbitmq\n  rabbitmq:\n    url: not-a-url\n');
+    expect(() => loadConfig({ path })).toThrowError(/queue\.rabbitmq\.url/);
+    try {
+      loadConfig({ path });
+    } catch (error) {
+      expect(String(error)).not.toContain('not-a-url');
+    }
+  });
+
+  it('rejects unknown keys inside rabbitmq', () => {
+    const path = writeConfig('queue:\n  provider: rabbitmq\n  rabbitmq:\n    nope: true\n');
+    expect(() => loadConfig({ path })).toThrowError(/queue\.rabbitmq\.nope/);
+  });
+
+  it('keeps the store section free of rabbitmq keys', () => {
+    const path = writeConfig('store:\n  rabbitmq: {}\n');
+    expect(() => loadConfig({ path })).toThrowError(/store\.rabbitmq/);
   });
 });
