@@ -33,7 +33,10 @@ export function createPersistence(config: McprelayConfig): Persistence {
       return queue;
     },
     getStore() {
-      store ??= new SqliteStore({ path: config.store.sqlite.path });
+      store ??= new SqliteStore({
+        path: config.store.sqlite.path,
+        retentionDays: config.store.retentionDays,
+      });
       return store;
     },
     async close() {

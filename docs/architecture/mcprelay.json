@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "mcprelay M7 \u2014 pluggable DLQ (SQLite \u00b7 RabbitMQ) on one pipeline",
+    "title": "mcprelay M8 \u2014 DLQ, replay, and metrics on one pipeline",
     "output": "mcprelay.html",
     "quality_profile": "showcase",
     "viewBox": [
@@ -148,7 +148,7 @@
       "type": "database",
       "label": "DLQ + Store",
       "sublabel": "sqlite | rabbitmq dlx",
-      "tag": "replay index \u00b7 confirms \u00b7 redaction",
+      "tag": "WAL \u00b7 redaction \u00b7 retention",
       "pos": [
         694,
         60
@@ -163,7 +163,7 @@
       "type": "database",
       "label": "Call log",
       "sublabel": "JSON line per tools/call",
-      "tag": "stderr",
+      "tag": "stderr \u00b7 mirrors to Store",
       "pos": [
         694,
         330
@@ -176,9 +176,9 @@
     {
       "id": "replay-cli",
       "type": "backend",
-      "label": "Replay CLI",
-      "sublabel": "run \u00b7 --dry-run \u00b7 --force",
-      "tag": "claim \u00b7 dedup",
+      "label": "CLIs",
+      "sublabel": "replay \u00b7 report",
+      "tag": "claim \u00b7 dedup \u00b7 metrics",
       "pos": [
         870,
         60

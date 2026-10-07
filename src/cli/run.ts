@@ -2,6 +2,7 @@ import { EXIT_OK, EXIT_USAGE } from '../exit-codes.js';
 import { loadConfig } from '../config/config.js';
 import { runPolicy } from '../policy/policy-cli.js';
 import { runProxy, type ProxyInvocation } from '../proxy/run.js';
+import { runReport } from '../report/report-cli.js';
 import { runReplay } from '../replay/replay-cli.js';
 import { packageVersion } from '../version.js';
 
@@ -22,6 +23,7 @@ Commands:
   run        Wrap a stdio MCP server: mcprelay run [options] -- <server command…>
              (also: mcprelay [options] -- <server command…>)
   replay     Inspect the dead-letter queue: replay list | replay inspect <id>
+  report     Per-tool metrics for a time range (default: last 24h)
   policy     Inspect policy decisions: policy test [--tool X --args JSON | --id <id>]
   validate   Check the configuration and report precise errors
   version    Print the mcprelay version
@@ -45,8 +47,8 @@ Exit codes:
   2  usage or configuration error
   3  upstream failure (the wrapped server exited unexpectedly)
 
-Status: M5 — declarative policy (allow/deny by tool, caller, and arguments;
-dry-run and denial audit). HTTP transport lands next — see docs/PRD.md §12.
+Status: M8 — per-tool metrics persisted from call events and rendered by
+'report' (with retention). See docs/PRD.md §12.
 `;
 
 interface RunInvocation {
@@ -284,6 +286,10 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
 
   if (command === 'replay') {
     return runReplay(rest, io);
+  }
+
+  if (command === 'report') {
+    return runReport(rest, io);
   }
 
   if (command === 'policy') {

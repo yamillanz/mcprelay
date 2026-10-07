@@ -61,6 +61,7 @@ export interface QueueConfig {
 export interface StoreConfig {
   provider: 'sqlite';
   sqlite: { path: string };
+  retentionDays: number;
 }
 
 export interface RedactionConfig {
@@ -114,7 +115,7 @@ const PER_TOOL_KEYS = new Set([
   'capture_tool_errors',
 ]);
 const QUEUE_KEYS = new Set(['provider', 'sqlite', 'rabbitmq']);
-const STORE_KEYS = new Set(['provider', 'sqlite']);
+const STORE_KEYS = new Set(['provider', 'sqlite', 'retention_days']);
 const RABBITMQ_KEYS = new Set(['url', 'exchange', 'queue']);
 const SQLITE_KEYS = new Set(['path']);
 const REDACTION_KEYS = new Set(['patterns']);
@@ -133,7 +134,11 @@ export function defaultConfig(): McprelayConfig {
       sqlite: { path: './.mcprelay/queue.db' },
       rabbitmq: { url: 'amqp://localhost', exchange: 'mcp.dlx', queue: 'mcp.dlq' },
     },
-    store: { provider: 'sqlite', sqlite: { path: './.mcprelay/history.db' } },
+    store: {
+      provider: 'sqlite',
+      sqlite: { path: './.mcprelay/history.db' },
+      retentionDays: 30,
+    },
     redaction: { patterns: [...DEFAULT_REDACTION_PATTERNS] },
     policy: defaultPolicyConfig(),
     upstream: { http: { headers: {} } },
@@ -366,7 +371,7 @@ function applySqlitePath(target: { path: string }, raw: unknown, label: string):
 }
 
 function applySqliteSection(
-  target: { provider: 'sqlite'; sqlite: { path: string } },
+  target: StoreConfig,
   raw: unknown,
   label: string,
   allowedKeys: Set<string>,
@@ -383,6 +388,15 @@ function applySqliteSection(
     target.provider = 'sqlite';
   }
   if ('sqlite' in raw) applySqlitePath(target.sqlite, raw.sqlite, `${label}.sqlite`);
+  if ('retention_days' in raw) {
+    const value = raw.retention_days;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      throw new ConfigError(
+        `${label}.retention_days: expected a non-negative integer, got ${JSON.stringify(value)}`,
+      );
+    }
+    target.retentionDays = value;
+  }
 }
 
 function isAmqpUrl(value: string): boolean {

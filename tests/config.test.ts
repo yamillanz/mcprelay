@@ -151,6 +151,7 @@ describe('queue, store, and redaction sections', () => {
     expect(config.store).toEqual({
       provider: 'sqlite',
       sqlite: { path: './.mcprelay/history.db' },
+      retentionDays: 30,
     });
     expect(config.redaction.patterns).toContain('api_key');
     expect(config.redaction.patterns).toContain('credential');
@@ -356,5 +357,28 @@ queue:
   it('keeps the store section free of rabbitmq keys', () => {
     const path = writeConfig('store:\n  rabbitmq: {}\n');
     expect(() => loadConfig({ path })).toThrowError(/store\.rabbitmq/);
+  });
+});
+
+describe('store retention', () => {
+  it('defaults to 30 days', () => {
+    expect(defaultConfig().store.retentionDays).toBe(30);
+  });
+
+  it('applies file overrides', () => {
+    const path = writeConfig('store:\n  retention_days: 7\n');
+    expect(loadConfig({ path }).store.retentionDays).toBe(7);
+  });
+
+  it('rejects invalid values with path and field', () => {
+    for (const value of ['-1', '1.5', 'soon']) {
+      const path = writeConfig(`store:\n  retention_days: ${value}\n`);
+      expect(() => loadConfig({ path })).toThrowError(/store\.retention_days/);
+    }
+  });
+
+  it('accepts zero to disable pruning', () => {
+    const path = writeConfig('store:\n  retention_days: 0\n');
+    expect(loadConfig({ path }).store.retentionDays).toBe(0);
   });
 });

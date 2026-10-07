@@ -440,6 +440,29 @@ async function recordDenial(deps: InterceptionDeps, input: DenialInput): Promise
   }
 }
 
+/** Emits the log line and persists the matching call event (log/metrics parity, M8). */
+async function logCall(deps: InterceptionDeps, entry: CallLogEntry): Promise<void> {
+  deps.logger.log(entry);
+  if (entry.enforced === false) return;
+  try {
+    await deps.persistence.getStore().recordCall({
+      correlation_id: entry.correlation_id,
+      timestamp: entry.timestamp,
+      caller: entry.caller,
+      tool: entry.tool,
+      decision: entry.decision,
+      latency_ms: entry.latency_ms,
+      request_bytes: entry.request_bytes,
+      response_bytes: entry.response_bytes,
+      attempt: entry.attempt,
+    });
+  } catch (error) {
+    deps.stderr(
+      `mcprelay: metrics write failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
 async function interceptToolCall(
   deps: InterceptionDeps,
   request: { params: { name: string } & Record<string, unknown> },
@@ -476,7 +499,8 @@ async function interceptToolCall(
     const message = `policy denied tool '${tool}': ${decision.reason}`;
     if (deps.config.policyDryRun) {
       deps.stderr(`mcprelay: policy dry-run: would deny tool '${tool}' (${decision.reason})\n`);
-      deps.logger.log(
+      await logCall(
+        deps,
         buildCallLogEntry({
           ...logBase,
           decision: 'denied',
@@ -487,7 +511,8 @@ async function interceptToolCall(
         }),
       );
     } else {
-      deps.logger.log(
+      await logCall(
+        deps,
         buildCallLogEntry({
           ...logBase,
           decision: 'denied',
@@ -556,7 +581,8 @@ async function interceptToolCall(
         );
       }
     }
-    deps.logger.log(
+    await logCall(
+      deps,
       buildCallLogEntry({
         ...logBase,
         decision: isError ? 'failed' : 'allowed',
@@ -572,7 +598,8 @@ async function interceptToolCall(
   const message = error instanceof Error ? error.message : String(error);
 
   if (result.classification.class === 'cancelled') {
-    deps.logger.log(
+    await logCall(
+      deps,
       buildCallLogEntry({
         ...logBase,
         decision: 'cancelled',
@@ -596,7 +623,8 @@ async function interceptToolCall(
   }
 
   const code = (error as { code?: number }).code;
-  deps.logger.log(
+  await logCall(
+    deps,
     buildCallLogEntry({
       ...logBase,
       decision: 'failed',
