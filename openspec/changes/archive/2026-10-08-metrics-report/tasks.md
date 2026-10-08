@@ -56,5 +56,7 @@ Scenario → test traceability: "Every decision is persisted" / "Metrics group p
   - 2026-10-07 hermetic: typecheck/lint/format/build/build:examples clean; **356 passed + 5 skipped** (broker suites skip with notice; M8 touches no broker code); `spec:validate` 12/12
 - [x] 6.2 Demo-beat-5 evidence: a real session (filesystem server: allowed call, denied call, captured failure) then `mcprelay report` shows real numbers and the report reconciles with the structured log lines — record the output here
   - 2026-10-07 evidence run (real filesystem server): logs `read_file:allowed`, `write_file:denied`, `read_file:failed` → `report --json` totals `{calls:3, allowed:1, denied:1, failed:1, cancelled:0, replayed:0}`, rows `local/read_file:2/1/0.5`, `local/write_file:1/0/0` → **metrics match logs: true**; table renders `50.0%` for read_file; the failed call is in the DLQ (`read_file:tool_error`)
-- [ ] 6.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-- [ ] 6.4 Human approval to archive (rule 0); archive the change after approval
+- [x] 6.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
+  - Approved 2026-10-07: `2fa7452` feat (+ `803eff6` spec) pushed to `origin/main`
+- [x] 6.4 Human approval to archive (rule 0); archive the change after approval
+  - Approved and archived 2026-10-08 as `2026-10-08-metrics-report`
