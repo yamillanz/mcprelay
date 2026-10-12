@@ -21,7 +21,7 @@ Scenario → evidence traceability: "Three public recipes present" / "Every reci
 - [x] 2.2 `scripts/demo-gif.mjs`: transcript → frames → `docs/assets/demo.gif` (D2 pipeline; ffmpeg, ImageMagick fallback) — verification gate: GIF produced, < ≈ 2 MB, legible at render width
   - 25 frames, 1200×679, **1.16 MB**; scrolling viewport + progressive reveal; color-coded (prompt/log/error); visually verified (first/mid/final frames); `%` escaped for ImageMagick annotate
 - [x] 2.3 README hero embeds the GIF (absolute raw URL, D4) — verification gate: GitHub render + npm render after publish (7.4)
-  - Absolute raw URL added after the npm note (renders on GitHub + npm once pushed/published)
+  - Absolute raw URL added after the npm note; npm-published README embeds it (registry readme check) and the raw URL serves 200 (1,206,049 bytes) → renders on GitHub + npm
 
 ## 3. Public examples (D3)
 
@@ -54,7 +54,8 @@ Scenario → evidence traceability: "Three public recipes present" / "Every reci
   - Version bumped; CHANGELOG.md written (Keep a Changelog, full 1.0.0 feature set)
 - [x] 6.2 `npm pack` → inspect the tarball (dist only + README) and smoke the packed tarball locally (`npx <tarball> --version` → 1.0.0) — verification gate: recorded output
   - 119 entries (dist + LICENSE + README + package.json, no test/docs bloat); `npx ./yamillanz-mcprelay-1.0.0.tgz --version` → **1.0.0**
-- [ ] 6.3 **Human gate (rule 0):** `npm publish` of 1.0.0 is a human action — then `npx @yamillanz/mcprelay --version` → 1.0.0, recorded ("Published package smoke")
+- [x] 6.3 **Human gate (rule 0):** `npm publish` of 1.0.0 is a human action — then `npx @yamillanz/mcprelay --version` → 1.0.0, recorded ("Published package smoke")
+  - 2026-10-12: publish done by the maintainer (web auth; the earlier E404 was npmjs masking a stale `_authToken` — `npm whoami` returned E401; fixed with `npm login`); registry shows 1.0.0; **`npx -y @yamillanz/mcprelay@1.0.0 --version` → `1.0.0`**
 
 ## 7. §9 gating verification matrix (record evidence per metric)
 
@@ -62,8 +63,10 @@ Scenario → evidence traceability: "Three public recipes present" / "Every reci
   - Real filesystem server; `report` shows `replayed 1`; GIF 1.16 MB committed at `docs/assets/demo.gif`
 - [x] 7.2 `docker compose up` demo works (re-run; ends on `demo: OK`)
   - 2026-10-12 re-run: `docker compose up --build --abort-on-container-exit --exit-code-from demo` → exit 0; log ends `demo: broker amqp://rabbitmq, queue mcp.dlq` · `step 5: replay ok: 01M4R6G6J4YKHB4ZXQESQV94H8` · **`demo: OK`**; `docker compose down -v` clean
-- [ ] 7.3 CI green on the release commits
-- [ ] 7.4 Package published to npm and runnable via `npx` (evidence from 6.3)
+- [x] 7.3 CI green on the release commits
+  - Run `38262320166` (push `7c057fa`): all three jobs green — check (node 20) 2m28s, check (node 22), rabbitmq adapter; `tests/examples.test.ts` **4/4 on both nodes** (verified in the job logs); lint included the fixed `scripts/` globals
+- [x] 7.4 Package published to npm and runnable via `npx` (evidence from 6.3)
+  - `npm view @yamillanz/mcprelay version` → 1.0.0 (propagated ~90 s); npx smoke green; published README embeds the GIF (absolute raw URL) and the URL serves 200 (1,206,049 bytes)
 - [x] 7.5 ≥ 3 documented examples with public MCP servers in `/examples` (evidence from group 3)
   - filesystem · memory · everything — configs + READMEs; `tests/examples.test.ts` 4/4 (all three wrapped, `tools/list` ≥ 1)
 - [x] 7.6 Zero-intrusion proof test (FR-P2) present in the suite (name the test file + case)
@@ -78,4 +81,5 @@ Scenario → evidence traceability: "Three public recipes present" / "Every reci
 - [x] 8.3 `craft-reviewer` pass over the change's code artifacts (`scripts/`, `tests/examples.test.ts`, example configs) — verdict APPROVED with gate numbers
   - Round 1: CHANGES_REQUIRED (1 BLOCKER: `npm run lint` failed — 14 × no-undef in `scripts/**.mjs`, masked locally by a `| tail` pipeline; 4 MAJORs). All fixed: eslint globals extended to `scripts/**/*.mjs`; demo self-enforces the side effect (`replay.status === 0 && existsSync` → else `demo: FAILED` + exit 1); `execCli`/`runCli` split, dead `cwd` removed; session plumbing extracted to `scripts/demo-session.mjs` (named `drainLines`, waiter records, internal id counter); log-line cross-pipe race fixed (`collectLogLines`, stable-count wait); try/finally cleanup in demo + test; `DEMO_GIF_FONT`/`BOTTOM_PAD`/`PALETTE_COLORS`/`ERROR_MESSAGE_MAX` constants.
   - Round 2 (delta re-review): **VERDICT: APPROVED** — 0 BLOCKERS, 0 MAJORS (demo.mjs 211-line band explicitly justified: single-responsibility linear flow + embedded config fixture, `// gate-exemption:` receipt added), 1 MINOR (takeFrame callback-depth 2) fixed on the spot; all functions re-measured within gates; no `src/` changes; suite 384+5, lint exit 0 direct.
-- [ ] 8.4 Human approval gates (rule 0): commit/push and archive — ask, state scope and message, and wait
+- [x] 8.4 Human approval gates (rule 0): commit/push and archive — ask, state scope and message, and wait
+  - Commit/push approved 2026-10-12 (`7c057fa` feat: mcprelay v1.0); archive approved and applied 2026-10-12 as `2026-10-12-release-1-0`
