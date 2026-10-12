@@ -49,4 +49,5 @@ Scenario → test traceability: "Handler reads as named gates" / "Helpers stay c
 
 - [x] 4.1 Human approval for the commit/push — state the exact staged scope and message and wait
   - Approved 2026-10-12 ("yes, approved, commit and push, next archive it, commit and push again")
-- [ ] 4.2 Human approval to archive; archive the change after approval
+- [x] 4.2 Human approval to archive; archive the change after approval
+  - Approved and archived 2026-10-12 as `2026-10-12-refactor-intercept-call`
