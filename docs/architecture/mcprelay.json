@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "mcprelay M8 \u2014 DLQ, replay, and metrics on one pipeline",
+    "title": "mcprelay M9 \u2014 identities on the client edge",
     "output": "mcprelay.html",
     "quality_profile": "showcase",
     "viewBox": [
@@ -60,7 +60,7 @@
       "type": "backend",
       "label": "Bridge",
       "sublabel": "tools/call interception",
-      "tag": "correlation_id \u00b7 session",
+      "tag": "correlation_id \u00b7 identity",
       "pos": [
         518,
         190

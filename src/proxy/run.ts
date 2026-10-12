@@ -18,6 +18,7 @@ export interface ProxyOptions {
   timeoutMs?: number;
   maxAttempts?: number;
   policyDryRun?: boolean;
+  identity?: string;
 }
 
 /**
@@ -45,6 +46,7 @@ export async function runProxy(
     return EXIT_USAGE;
   }
   for (const warning of config.warnings) io.stderr(`mcprelay: warning: ${warning}\n`);
+  if (options.identity !== undefined) config.identity.profile = options.identity;
 
   const target: UpstreamTarget =
     invocation.kind === 'http'

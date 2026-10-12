@@ -382,3 +382,61 @@ describe('store retention', () => {
     expect(loadConfig({ path }).store.retentionDays).toBe(0);
   });
 });
+
+describe('identity section', () => {
+  it('defaults to local with no key store', () => {
+    expect(defaultConfig().identity).toEqual({ profile: 'local', keys: [] });
+  });
+
+  it('applies file values', () => {
+    const path = writeConfig(`
+identity:
+  profile: reviewer-bot
+  keys:
+    - { key: sk-agent-a, identity: agent-a }
+    - { key: sk-agent-b, identity: agent-b }
+`);
+    const config = loadConfig({ path });
+    expect(config.identity.profile).toBe('reviewer-bot');
+    expect(config.identity.keys).toEqual([
+      { key: 'sk-agent-a', identity: 'agent-a' },
+      { key: 'sk-agent-b', identity: 'agent-b' },
+    ]);
+  });
+
+  it('rejects duplicate keys without echoing the value', () => {
+    const path = writeConfig(`
+identity:
+  keys:
+    - { key: sk-dup, identity: agent-a }
+    - { key: sk-dup, identity: agent-b }
+`);
+    expect(() => loadConfig({ path })).toThrowError(/identity\.keys/);
+    try {
+      loadConfig({ path });
+    } catch (error) {
+      expect(String(error)).not.toContain('sk-dup');
+    }
+  });
+
+  it('rejects malformed entries with path and field', () => {
+    const missingIdentity = writeConfig('identity:\n  keys:\n    - { key: sk-a }\n');
+    expect(() => loadConfig({ path: missingIdentity })).toThrowError(
+      /identity\.keys\[0\]\.identity/,
+    );
+
+    const notAList = writeConfig('identity:\n  keys: nope\n');
+    expect(() => loadConfig({ path: notAList })).toThrowError(/identity\.keys/);
+
+    const badProfile = writeConfig('identity:\n  profile: 42\n');
+    expect(() => loadConfig({ path: badProfile })).toThrowError(/identity\.profile/);
+  });
+
+  it('rejects unknown keys with path and field', () => {
+    const section = writeConfig('identity:\n  nope: true\n');
+    expect(() => loadConfig({ path: section })).toThrowError(/identity\.nope/);
+
+    const entry = writeConfig('identity:\n  keys:\n    - { key: sk-a, identity: a, extra: 1 }\n');
+    expect(() => loadConfig({ path: entry })).toThrowError(/identity\.keys\[0\]\.extra/);
+  });
+});

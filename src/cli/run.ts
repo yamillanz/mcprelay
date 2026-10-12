@@ -34,6 +34,8 @@ Run options:
   --timeout-ms <ms>     Per-call timeout; overrides the config file
   --max-attempts <n>    Retry bound; overrides the config file
   --policy-dry-run      Report policy decisions without enforcing them
+  --identity <name>     Caller identity for this session (default: the
+                        identity.profile from config, or 'local')
   --http <url>          Wrap a remote Streamable HTTP server instead of a
                         local command (config: upstream.http.headers)
 
@@ -59,6 +61,7 @@ interface RunInvocation {
   timeoutMs?: number;
   maxAttempts?: number;
   policyDryRun?: boolean;
+  identity?: string;
 }
 
 type ParsedRun = { ok: true; invocation: RunInvocation } | { ok: false; message: string };
@@ -92,12 +95,20 @@ interface RunOptions {
   maxAttempts?: number;
   policyDryRun?: boolean;
   httpUrl?: string;
+  identity?: string;
 }
 
 function consumeConfigPath(tokens: readonly string[], index: number, options: RunOptions): Step {
   const read = readOptionValue(tokens, index, '--config');
   if (!read.ok) return read;
   options.configPath = read.value;
+  return { ok: true, next: read.next };
+}
+
+function consumeIdentity(tokens: readonly string[], index: number, options: RunOptions): Step {
+  const read = readOptionValue(tokens, index, '--identity');
+  if (!read.ok) return read;
+  options.identity = read.value;
   return { ok: true, next: read.next };
 }
 
@@ -151,6 +162,8 @@ function consumeRunToken(
       return consumeIntegerOption(tokens, index, token, options);
     case '--policy-dry-run':
       return consumePolicyDryRun(index, options);
+    case '--identity':
+      return consumeIdentity(tokens, index, options);
     default:
       return { ok: false, message: `Unknown option '${token}'.` };
   }
@@ -168,6 +181,7 @@ function buildInvocation(
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
     ...(options.policyDryRun === undefined ? {} : { policyDryRun: options.policyDryRun }),
+    ...(options.identity === undefined ? {} : { identity: options.identity }),
   };
 }
 
@@ -245,7 +259,7 @@ async function runValidate(tokens: readonly string[], io: CliIO): Promise<number
 async function runWith(tokens: readonly string[], io: CliIO): Promise<number> {
   const parsed = parseRunInvocation(tokens);
   if (!parsed.ok) return usageError(io, parsed.message);
-  const { httpUrl, command, args, configPath, timeoutMs, maxAttempts, policyDryRun } =
+  const { httpUrl, command, args, configPath, timeoutMs, maxAttempts, policyDryRun, identity } =
     parsed.invocation;
   const invocation: ProxyInvocation =
     httpUrl !== undefined
@@ -256,6 +270,7 @@ async function runWith(tokens: readonly string[], io: CliIO): Promise<number> {
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(maxAttempts === undefined ? {} : { maxAttempts }),
     ...(policyDryRun === undefined ? {} : { policyDryRun }),
+    ...(identity === undefined ? {} : { identity }),
   });
 }
 
@@ -303,6 +318,7 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
     command === '--timeout-ms' ||
     command === '--max-attempts' ||
     command === '--policy-dry-run' ||
+    command === '--identity' ||
     command === '--http'
   ) {
     return runWith(command === 'run' ? rest : argv, io);

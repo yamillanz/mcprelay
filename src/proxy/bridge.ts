@@ -16,6 +16,7 @@ import {
 } from '@modelcontextprotocol/server';
 import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 
+import { resolveIdentity, stripCredentialFields } from '../identity/identity.js';
 import type { CallLogEntry, CallLogger } from '../observability/call-log.js';
 import { resolveToolPolicy, type McprelayConfig } from '../config/config.js';
 import { evaluateCall, type PolicyDecision } from '../policy/policy.js';
@@ -92,6 +93,7 @@ interface CallMetadata {
 interface CallLogFields {
   correlationId: string;
   trace: TraceFields;
+  caller: CallLogEntry['caller'];
   tool: string;
   serverName: string;
   decision: 'allowed' | 'denied' | 'failed' | 'cancelled';
@@ -322,7 +324,10 @@ function prepareCallMetadata(requestParams: Record<string, unknown>): CallMetada
     progressToken: originalMeta.progressToken,
     params: {
       ...requestParams,
-      _meta: { ...originalMeta, mcprelay: { correlation_id: correlationId } },
+      _meta: {
+        ...stripCredentialFields(originalMeta),
+        mcprelay: { correlation_id: correlationId },
+      },
     },
     trace,
   };
@@ -333,7 +338,7 @@ function buildCallLogEntry(fields: CallLogFields): CallLogEntry {
     timestamp: new Date().toISOString(),
     correlation_id: fields.correlationId,
     ...(Object.keys(fields.trace).length === 0 ? {} : { trace: fields.trace }),
-    caller: { type: 'stdio', identity: 'local' },
+    caller: fields.caller,
     server: fields.serverName,
     tool: fields.tool,
     decision: fields.decision,
@@ -368,6 +373,7 @@ function failurePhase(
 interface CaptureInput {
   tool: string;
   correlationId: string;
+  caller: CallLogEntry['caller'];
   rawArguments: unknown;
   failureClass: FailureRecord['failure']['class'];
   message: string;
@@ -377,6 +383,37 @@ interface CaptureInput {
 /** Server-defined JSON-RPC code for an enforced policy denial (ADR-0006). */
 const POLICY_DENIED_CODE = -32001;
 
+/** Server-defined JSON-RPC code for a rejected caller credential (ADR-0010; -32002 is SDK-reserved). */
+const AUTH_DENIED_CODE = -32003;
+
+const UNAUTHENTICATED: CallLogEntry['caller'] = {
+  type: 'stdio',
+  identity: 'unauthenticated',
+};
+
+interface AuthDenialInput {
+  tool: string;
+  correlationId: string;
+  reason: string;
+}
+
+/** Audit entry for an auth rejection; a store failure never blocks the denial. */
+async function recordAuthDenial(deps: InterceptionDeps, input: AuthDenialInput): Promise<void> {
+  try {
+    await deps.persistence.getStore().audit({
+      kind: 'denied',
+      correlationId: input.correlationId,
+      toolName: input.tool,
+      detail: { action: 'auth', reason: input.reason },
+    });
+  } catch (error) {
+    deps.stderr(
+      `mcprelay: auth denial audit failed: ${error instanceof Error ? error.message : String(error)}
+`,
+    );
+  }
+}
+
 /** Durable, redacted capture; never blocks the client if persistence fails. */
 async function captureFailure(deps: InterceptionDeps, input: CaptureInput): Promise<void> {
   const patterns = deps.config.redaction.patterns;
@@ -384,7 +421,7 @@ async function captureFailure(deps: InterceptionDeps, input: CaptureInput): Prom
     id: newFailureRecordId(),
     correlation_id: input.correlationId,
     captured_at: new Date().toISOString(),
-    caller: { type: 'stdio', identity: 'local' },
+    caller: input.caller,
     server: {
       name: deps.session.server.name,
       command: deps.serverCommand,
@@ -479,9 +516,36 @@ async function interceptToolCall(
   const { correlationId, progressToken, params, trace } = prepareCallMetadata(request.params);
   const requestBytes = byteLength(params);
 
+  // Identity resolves before policy: a rejected credential never reaches the
+  // retry pipeline, the upstream, or the DLQ (FR-A1/FR-A3, ADR-0010).
+  const resolution = resolveIdentity(deps.config.identity, request.params._meta);
+  if (!resolution.ok) {
+    const message = `authentication failed: ${resolution.reason}`;
+    await logCall(
+      deps,
+      buildCallLogEntry({
+        correlationId,
+        trace,
+        caller: UNAUTHENTICATED,
+        tool,
+        serverName: deps.session.server.name,
+        startedAt,
+        decision: 'denied',
+        requestBytes,
+        responseBytes: 0,
+        attempt: 0,
+        error: { message },
+      }),
+    );
+    await recordAuthDenial(deps, { tool, correlationId, reason: resolution.reason });
+    throw new ProtocolError(AUTH_DENIED_CODE, message);
+  }
+
+  const caller: CallLogEntry['caller'] = { type: 'stdio', identity: resolution.identity };
   const logBase = {
     correlationId,
     trace,
+    caller,
     tool,
     serverName: deps.session.server.name,
     startedAt,
@@ -493,7 +557,7 @@ async function interceptToolCall(
   const decision = evaluateCall(deps.config.policy, {
     tool,
     arguments: rawArguments,
-    caller: 'local',
+    caller: resolution.identity,
   });
   if (decision.action === 'deny') {
     const message = `policy denied tool '${tool}': ${decision.reason}`;
@@ -560,6 +624,7 @@ async function interceptToolCall(
       await captureFailure(deps, {
         tool,
         correlationId,
+        caller,
         rawArguments,
         failureClass: 'tool_error',
         message: 'isError result',
@@ -615,6 +680,7 @@ async function interceptToolCall(
     await captureFailure(deps, {
       tool,
       correlationId,
+      caller,
       rawArguments,
       failureClass: recordClass,
       message,

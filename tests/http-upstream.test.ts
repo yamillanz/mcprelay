@@ -291,6 +291,35 @@ describe('http-transport — wrapping and fidelity', () => {
     expect(headers['x-test-header']).toBe('configured-value');
     expect(JSON.stringify(headers)).not.toContain('client-token');
   });
+
+  it('strips client credentials from the forwarded body while other meta keys survive', async () => {
+    const url = await startFixture();
+    const raw = proxy(
+      url,
+      configFile(
+        workdir(),
+        'upstream:\n  http:\n    headers:\n      x-test-header: configured-value\n',
+      ),
+    );
+    await handshake(raw);
+
+    await callTool(
+      raw,
+      10,
+      'echo',
+      { value: 1 },
+      { authorization: 'Bearer client-token', keep: 'yes' },
+    );
+    const stats = await upstreamStats(raw);
+    const params = stats.lastParams as { _meta?: Record<string, unknown> };
+    expect(params._meta?.authorization).toBeUndefined();
+    expect(params._meta?.keep).toBe('yes');
+    expect(JSON.stringify(stats.lastParams)).not.toContain('client-token');
+
+    const headers = stats.lastHeaders as Record<string, string>;
+    expect(headers['x-test-header']).toBe('configured-value');
+    expect(raw.stderr()).not.toContain('client-token');
+  });
 });
 
 describe('http-transport — D4 classification', () => {

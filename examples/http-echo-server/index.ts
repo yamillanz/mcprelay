@@ -10,7 +10,7 @@
  * Tools: echo, boom (isError), rpc-error (JSON-RPC error), sleep (timeout),
  * http-error (the HTTP layer answers 500 after the request arrived).
  *
- * Custom method `x/stats` reports `{ toolCalls, lastHeaders }` for tests.
+ * Custom method `x/stats` reports `{ toolCalls, lastHeaders, lastParams }` for tests.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -53,6 +53,7 @@ const TOOLS: ListToolsResult['tools'] = [
 
 let toolCalls = 0;
 let lastHeaders: Record<string, string | string[] | undefined> = {};
+let lastParams: Record<string, unknown> = {};
 
 function textResult(value: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value) }] };
@@ -68,6 +69,7 @@ function createFixtureServer(): Server {
 
   server.setRequestHandler('tools/call', async (request) => {
     toolCalls += 1;
+    lastParams = request.params as Record<string, unknown>;
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     switch (name) {
@@ -88,7 +90,7 @@ function createFixtureServer(): Server {
   });
 
   server.fallbackRequestHandler = async (request) => {
-    if (request.method === 'x/stats') return { toolCalls, lastHeaders };
+    if (request.method === 'x/stats') return { toolCalls, lastHeaders, lastParams };
     throw new ProtocolError(-32601, `Method not found: ${request.method}`);
   };
 

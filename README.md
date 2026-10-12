@@ -2,7 +2,7 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M8 — metrics and `report`.** Wrap any stdio server **or a remote Streamable HTTP server** with the same pipeline: per-call timeouts and classified retries, declarative allow/deny policy (with dry-run), a durable, redacted dead-letter queue, **replay as redrive for side effects** (including **batch replay**), an idempotency guard against duplicates, a **RabbitMQ-backed DLQ** beside the zero-infra SQLite default, and now **per-tool latency/error/caller metrics** persisted on every call and rendered by `mcprelay report`. See [`docs/PRD.md`](docs/PRD.md) §12 for what lands next.
+> **Status: M9 — identities.** Wrap any stdio server **or a remote Streamable HTTP server** with the same pipeline: per-call timeouts and classified retries, declarative allow/deny policy (with dry-run), a durable, redacted dead-letter queue, **replay as redrive for side effects** (including **batch replay**), an idempotency guard against duplicates, a **RabbitMQ-backed DLQ** beside the zero-infra SQLite default, **per-tool latency/error/caller metrics** persisted on every call and rendered by `mcprelay report`, and **caller identities** (config profile, static API keys, `--identity`) that feed policy and the report — with client credentials validated at the edge and never forwarded upstream. See [`docs/PRD.md`](docs/PRD.md) §12 for what lands next.
 >
 > Published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare `mcprelay` name is blocked by npm's name-similarity policy; scoped fallback per PRD §11 — the installed command is still `mcprelay`).
 
@@ -106,6 +106,7 @@ Policy, retries, DLQ capture, and replay work identically over HTTP, and records
 - **Duplicate guard** — successful keyed calls are indexed; replay refuses a duplicate within `reliability.replay.dedup_window` unless `--force` is given.
 - **Structured logs** — one JSON line per intercepted call on stderr with correlation id, latency, payload sizes, attempts, and decision.
 - **Metrics and `report`** — every intercepted call is persisted as a call event (decision, latency, payload sizes, attempts, caller) — the same data as its log line. `mcprelay report` renders per-tool latency p50/p95, error rate, and caller attribution for a time range, with `--json` for CI, bounded by `store.retention_days` (default 30 days).
+- **Caller identities** — `identity.profile` (default `local`) names the caller of a stdio wrap; `identity.keys` maps static API keys to identities; `run --identity <name>` overrides the profile. Identities feed policy `caller` rules, logs, call events, and `report`. A client credential in `_meta.authorization` is validated at the edge (unrecognized → `-32003`, denied, never forwarded) and stripped from every relay.
 
 ## What replay means
 
@@ -222,6 +223,10 @@ queue:
   provider: sqlite # sqlite | rabbitmq
   sqlite: { path: ./.mcprelay/queue.db } # with rabbitmq: the local replay index
   rabbitmq: { url: amqp://localhost, exchange: mcp.dlx, queue: mcp.dlq }
+identity:
+  profile: local # caller identity for this stdio wrap
+  keys: # static API keys -> identities (optional)
+    - { key: sk-agent-a, identity: agent-a }
 store:
   provider: sqlite
   sqlite: { path: ./.mcprelay/history.db }
@@ -259,7 +264,7 @@ docker run -d --name mcprelay-rabbit -p 5672:5672 rabbitmq:4-alpine
 MCPRELAY_RABBITMQ_URL=amqp://localhost npx vitest run
 ```
 
-Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics, 0006 policy engine, 0007 HTTP transport, 0008 RabbitMQ adapter, 0009 metrics); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
+Spec-driven workflow lives in [`openspec/`](openspec/project.md); the product truth is [`docs/PRD.md`](docs/PRD.md); decisions are recorded in [`docs/adr/`](docs/adr/) (0001 layout, 0002 stdio termination, 0003 failure taxonomy, 0004 DLQ persistence, 0005 replay semantics, 0006 policy engine, 0007 HTTP transport, 0008 RabbitMQ adapter, 0009 metrics, 0010 identity); the interactive architecture diagram is [`docs/architecture/mcprelay.html`](docs/architecture/mcprelay.html).
 
 ## License
 

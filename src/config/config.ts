@@ -68,6 +68,16 @@ export interface RedactionConfig {
   patterns: string[];
 }
 
+export interface IdentityKeyConfig {
+  key: string;
+  identity: string;
+}
+
+export interface IdentityConfig {
+  profile: string;
+  keys: IdentityKeyConfig[];
+}
+
 export interface UpstreamConfig {
   http: { headers: Record<string, string> };
 }
@@ -77,6 +87,7 @@ export interface McprelayConfig {
   queue: QueueConfig;
   store: StoreConfig;
   redaction: RedactionConfig;
+  identity: IdentityConfig;
   policy: PolicyConfig;
   upstream: UpstreamConfig;
   /** Runtime-only (CLI flag): evaluate policy but do not enforce. */
@@ -119,6 +130,8 @@ const STORE_KEYS = new Set(['provider', 'sqlite', 'retention_days']);
 const RABBITMQ_KEYS = new Set(['url', 'exchange', 'queue']);
 const SQLITE_KEYS = new Set(['path']);
 const REDACTION_KEYS = new Set(['patterns']);
+const IDENTITY_KEYS = new Set(['profile', 'keys']);
+const IDENTITY_KEY_ENTRY_KEYS = new Set(['key', 'identity']);
 
 export function defaultConfig(): McprelayConfig {
   return {
@@ -140,6 +153,7 @@ export function defaultConfig(): McprelayConfig {
       retentionDays: 30,
     },
     redaction: { patterns: [...DEFAULT_REDACTION_PATTERNS] },
+    identity: { profile: 'local', keys: [] },
     policy: defaultPolicyConfig(),
     upstream: { http: { headers: {} } },
     policyDryRun: false,
@@ -353,6 +367,7 @@ const TOP_LEVEL_KEYS = new Set([
   'queue',
   'store',
   'redaction',
+  'identity',
   'policy',
   'upstream',
 ]);
@@ -452,6 +467,44 @@ function applyQueueSection(target: QueueConfig, raw: unknown, label: string): vo
   if ('rabbitmq' in raw) applyRabbitMqSection(target.rabbitmq, raw.rabbitmq, `${label}.rabbitmq`);
 }
 
+function applyIdentity(config: McprelayConfig, raw: unknown, label: string): void {
+  if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
+  assertKnownKeys(raw, IDENTITY_KEYS, label);
+  if ('profile' in raw) {
+    if (typeof raw.profile !== 'string' || raw.profile.length === 0) {
+      throw new ConfigError(
+        `${label}.profile: expected a non-empty string, got ${JSON.stringify(raw.profile)}`,
+      );
+    }
+    config.identity.profile = raw.profile;
+  }
+  if ('keys' in raw) {
+    const keys = raw.keys;
+    if (!Array.isArray(keys)) {
+      throw new ConfigError(`${label}.keys: expected a list of { key, identity } entries`);
+    }
+    const parsed: IdentityKeyConfig[] = [];
+    const seen = new Set<string>();
+    keys.forEach((entry, index) => {
+      const entryLabel = `${label}.keys[${index}]`;
+      if (!isRecord(entry)) throw new ConfigError(`${entryLabel}: expected a mapping`);
+      assertKnownKeys(entry, IDENTITY_KEY_ENTRY_KEYS, entryLabel);
+      if (typeof entry.key !== 'string' || entry.key.length === 0) {
+        throw new ConfigError(`${entryLabel}.key: expected a non-empty string`);
+      }
+      if (typeof entry.identity !== 'string' || entry.identity.length === 0) {
+        throw new ConfigError(`${entryLabel}.identity: expected a non-empty string`);
+      }
+      if (seen.has(entry.key)) {
+        throw new ConfigError(`${entryLabel}.key: duplicate key value (value not echoed)`);
+      }
+      seen.add(entry.key);
+      parsed.push({ key: entry.key, identity: entry.identity });
+    });
+    config.identity.keys = parsed;
+  }
+}
+
 function applyRedaction(config: McprelayConfig, raw: unknown, label: string): void {
   if (!isRecord(raw)) throw new ConfigError(`${label}: expected a mapping`);
   assertKnownKeys(raw, REDACTION_KEYS, label);
@@ -520,6 +573,7 @@ function applyConfigDocument(
     applySqliteSection(config.store, document.store, `${path}: store`, STORE_KEYS);
   }
   if ('redaction' in document) applyRedaction(config, document.redaction, `${path}: redaction`);
+  if ('identity' in document) applyIdentity(config, document.identity, `${path}: identity`);
   if ('policy' in document) applyPolicy(config, document.policy, `${path}: policy`);
   if ('upstream' in document) applyUpstream(config, document.upstream, `${path}: upstream`);
 }

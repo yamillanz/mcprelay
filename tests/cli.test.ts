@@ -213,4 +213,25 @@ describe('mcprelay run parser characterization', () => {
     expect(code).toBe(EXIT_USAGE);
     expect(stderr()).toContain('config file not found');
   });
+
+  it('rejects a missing --identity value', async () => {
+    const { io, stderr } = capture();
+
+    const code = await runCli(['run', '--identity'], io);
+
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr()).toContain("Missing value for '--identity'.");
+  });
+
+  it('accepts --identity before the server command', async () => {
+    const { io, stderr } = capture();
+
+    const code = await runCli(
+      ['run', '--config', '/nonexistent.yaml', '--identity', 'ci-bot', '--', 'node', 'server.js'],
+      io,
+    );
+
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr()).toContain('config file not found');
+  });
 });
