@@ -65,4 +65,5 @@ Scenario → evidence traceability: "Format present" / "Blocks match the source"
 - [x] 8.3 `craft-reviewer` pass over the catalog (fidelity sample vs sources at the recorded commit, format compliance, index accuracy) — verdict APPROVED
   - Round 1: CHANGES_REQUIRED (2 MAJORs: unmarked elisions — `HttpUpstreamLink.close()` + the replay-run import block; 3 MINORs: identity line count, ADR-0003 display text, §6.2 wording). All fixed on the spot (close() and the imports restored verbatim; nothing elided remains unmarked).
   - Round 2 (delta re-review): **VERDICT: APPROVED — 0 BLOCKERS, 0 MAJORS, 0 MINORS**; the reviewer's stricter contiguous-run checker: every fence is an exact contiguous source run (0 skips); bridge/queue/retry/store carried forward clean (100% coverage each); link sweep 37/37; no `src/` changes.
-- [ ] 8.4 Human approval gates (rule 0): commit/push and archive — ask, state scope and message, and wait
+- [x] 8.4 Human approval gates (rule 0): commit/push and archive — ask, state scope and message, and wait
+  - Commit/push approved 2026-10-12 (`a7ebd16` docs: rewrite the bridge tour and add five key-file tours); archive approved and applied 2026-10-12 as `2026-10-12-code-tours`
