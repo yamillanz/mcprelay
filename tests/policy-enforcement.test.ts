@@ -91,6 +91,19 @@ interface LogEntry {
   enforced?: boolean;
 }
 
+/**
+ * Log lines arrive on stderr, a separate pipe from responses, so a response
+ * can be observed before its log line. Wait for `count` lines; on timeout
+ * return what arrived so the assertion reports the real diff.
+ */
+async function callLogsWhen(raw: RawSession, count: number, timeoutMs = 5000): Promise<LogEntry[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (callLogs(raw).length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return callLogs(raw);
+}
+
 function callLogs(raw: RawSession): LogEntry[] {
   return raw
     .stderr()
@@ -139,7 +152,7 @@ describe('FR-Y4 — denials are enforced, audited, and never forwarded', () => {
     await handshake(raw);
     await callTool(raw, 10, 'echo', { value: 1 });
 
-    const log = callLogs(raw).at(-1);
+    const log = (await callLogsWhen(raw, 1)).at(-1);
     const entries = await storeOf(dir).listAudit();
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
@@ -165,7 +178,7 @@ describe('FR-Y4 — denials are enforced, audited, and never forwarded', () => {
     await handshake(raw);
     await callTool(raw, 10, 'echo', {});
 
-    const entry = callLogs(raw).find((log) => log.tool === 'echo');
+    const entry = (await callLogsWhen(raw, 1)).find((log) => log.tool === 'echo');
     expect(entry).toMatchObject({ decision: 'denied', attempt: 0 });
     expect(entry?.error?.message).toContain('policy denied');
     expect(entry?.enforced).toBeUndefined();

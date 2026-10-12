@@ -77,6 +77,19 @@ interface LogEntry {
   error?: { message: string; code?: number };
 }
 
+/**
+ * Log lines arrive on stderr, a separate pipe from responses, so a response
+ * can be observed before its log line. Wait for `count` lines; on timeout
+ * return what arrived so the assertion reports the real diff.
+ */
+async function callLogsWhen(raw: RawSession, count: number, timeoutMs = 5000): Promise<LogEntry[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (callLogs(raw).length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return callLogs(raw);
+}
+
 function callLogs(raw: RawSession): LogEntry[] {
   return raw
     .stderr()
@@ -103,7 +116,7 @@ reliability:
     const response = await callTool(raw, 10, 'sleep', { ms: 300 });
     expect(response.error).toBeTypeOf('object');
     expect(await stats(raw, 11)).toMatchObject({ sleep: 1 });
-    expect(callLogs(raw).at(-1)).toMatchObject({ decision: 'failed', attempt: 1 });
+    expect((await callLogsWhen(raw, 1)).at(-1)).toMatchObject({ decision: 'failed', attempt: 1 });
   });
 
   it('retries a timeout for an idempotent tool with a per-tool override', async () => {
@@ -124,7 +137,7 @@ reliability:
     const response = await callTool(raw, 10, 'sleep', { ms: 300 });
     expect(response.error).toBeTypeOf('object');
     expect(await stats(raw, 11)).toMatchObject({ sleep: 2 });
-    expect(callLogs(raw).at(-1)).toMatchObject({ decision: 'failed', attempt: 2 });
+    expect((await callLogsWhen(raw, 1)).at(-1)).toMatchObject({ decision: 'failed', attempt: 2 });
   });
 });
 
@@ -146,7 +159,7 @@ reliability:
     expect(response.error).toBeUndefined();
     expect(response.result?.content?.[0]?.text).toBe('flaky success on call 3');
     expect(await stats(raw, 11)).toMatchObject({ flaky: 3 });
-    expect(callLogs(raw).at(-1)).toMatchObject({ decision: 'allowed', attempt: 3 });
+    expect((await callLogsWhen(raw, 1)).at(-1)).toMatchObject({ decision: 'allowed', attempt: 3 });
   });
 
   it('never exceeds the attempt bound', async () => {
@@ -165,7 +178,7 @@ reliability:
     const response = await callTool(raw, 10, 'flaky', { fail_times: 5 });
     expect(response.error).toBeTypeOf('object');
     expect(await stats(raw, 11)).toMatchObject({ flaky: 2 });
-    expect(callLogs(raw).at(-1)).toMatchObject({ decision: 'failed', attempt: 2 });
+    expect((await callLogsWhen(raw, 1)).at(-1)).toMatchObject({ decision: 'failed', attempt: 2 });
   });
 
   it('does not retry a transient error for a non-idempotent tool', async () => {
@@ -214,7 +227,7 @@ reliability:
     const response = await callTool(raw, 10, 'boom');
     expect(response.result?.isError).toBe(true);
     expect(await stats(raw, 11)).toMatchObject({ boom: 1 });
-    expect(callLogs(raw).at(-1)).toMatchObject({ decision: 'failed', attempt: 1 });
+    expect((await callLogsWhen(raw, 1)).at(-1)).toMatchObject({ decision: 'failed', attempt: 1 });
   });
 
   it('waits exponentially between attempts when jitter is off', async () => {
@@ -268,7 +281,10 @@ reliability:
     expect(cancelled.length).toBeGreaterThanOrEqual(1);
 
     expect(await stats(raw, 42)).toMatchObject({ sleep: 1 });
-    expect(callLogs(raw).at(-1)).toMatchObject({ decision: 'cancelled', attempt: 1 });
+    expect((await callLogsWhen(raw, 1)).at(-1)).toMatchObject({
+      decision: 'cancelled',
+      attempt: 1,
+    });
   });
 });
 

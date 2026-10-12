@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { requestFrame, startRaw, type RawSession } from './helpers/raw-client.js';
+import { requestFrame, startRaw, waitForStderr, type RawSession } from './helpers/raw-client.js';
 import { SqliteStore } from '../src/store/sqlite-store.js';
 
 const CLI = fileURLToPath(new URL('../dist/cli/index.js', import.meta.url));
@@ -58,6 +58,19 @@ interface LogEntry {
   enforced?: boolean;
 }
 
+/**
+ * Log lines arrive on stderr, a separate pipe from responses, so a response
+ * can be observed before its log line. Wait for `count` lines; on timeout
+ * return what arrived so the assertion reports the real diff.
+ */
+async function callLogsWhen(raw: RawSession, count: number, timeoutMs = 5000): Promise<LogEntry[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (callLogs(raw).length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return callLogs(raw);
+}
+
 function callLogs(raw: RawSession): LogEntry[] {
   return raw
     .stderr()
@@ -77,7 +90,7 @@ describe('FR-O1 — structured call logs', () => {
     await handshake(raw);
     await callTool(raw, 10, 'echo', { value: 1 });
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 1);
     expect(logs).toHaveLength(1);
     const entry = logs[0]!;
     expect(entry.decision).toBe('allowed');
@@ -98,7 +111,7 @@ describe('FR-O1 — structured call logs', () => {
     await handshake(raw);
     await callTool(raw, 11, 'boom');
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 1);
     expect(logs).toHaveLength(1);
     expect(logs[0]!.decision).toBe('failed');
     expect(logs[0]!.error?.message).toBe('isError result');
@@ -109,7 +122,7 @@ describe('FR-O1 — structured call logs', () => {
     await handshake(raw);
     await callTool(raw, 12, 'rpc-error');
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 1);
     expect(logs).toHaveLength(1);
     expect(logs[0]!.decision).toBe('failed');
     expect(logs[0]!.error).toMatchObject({ code: -32000 });
@@ -120,6 +133,7 @@ describe('FR-O1 — structured call logs', () => {
     await handshake(raw);
     await callTool(raw, 13, 'echo', { api_key: 'super-secret-value' });
 
+    await callLogsWhen(raw, 1);
     expect(raw.stderr()).not.toContain('super-secret-value');
   });
 
@@ -128,6 +142,7 @@ describe('FR-O1 — structured call logs', () => {
     await handshake(raw);
     await callTool(raw, 14, 'echo', { value: 2 });
 
+    await callLogsWhen(raw, 1);
     for (const line of raw.stderr().split('\n')) {
       if (line.startsWith('{')) expect(() => JSON.parse(line) as unknown).not.toThrow();
     }
@@ -140,7 +155,7 @@ describe('FR-O1 — structured call logs', () => {
     await raw.nextMessage(8000);
     await raw.waitForExit(8000);
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 1);
     expect(logs).toHaveLength(1);
     expect(logs[0]!.decision).toBe('failed');
     expect(logs[0]!.tool).toBe('crash');
@@ -266,7 +281,7 @@ describe('Call events mirror the log lines', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 400));
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 4);
     expect(logs.map((entry) => entry.decision).sort()).toEqual([
       'allowed',
       'cancelled',
@@ -306,7 +321,7 @@ describe('Call events mirror the log lines', () => {
     await handshake(raw);
     await callTool(raw, 10, 'flaky', {});
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 1);
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({ decision: 'allowed', attempt: 3 });
 
@@ -325,7 +340,7 @@ describe('Call events mirror the log lines', () => {
     await handshake(raw);
     await callTool(raw, 10, 'echo', { value: 1 });
 
-    const lines = callLogs(raw).map((entry) => ({
+    const lines = (await callLogsWhen(raw, 2)).map((entry) => ({
       decision: entry.decision,
       enforced: entry.enforced,
     }));
@@ -351,8 +366,10 @@ describe('Call events mirror the log lines', () => {
     await handshake(raw);
     await callTool(raw, 10, 'echo', { value: 1 });
 
-    expect(callLogs(raw)).toHaveLength(1);
-    expect(callLogs(raw)[0]?.decision).toBe('allowed');
+    await waitForStderr(raw, 'metrics write failed');
+    const logs = await callLogsWhen(raw, 1);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]?.decision).toBe('allowed');
     expect(raw.stderr()).toContain('metrics write failed');
   });
 });
@@ -366,7 +383,7 @@ describe('Caller identities (FR-A1/A3)', () => {
     await callTool(raw, 10, 'echo', { value: 1 });
     await callTool(raw, 11, 'boom', {});
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 2);
     expect(logs.map((entry) => `${entry.tool}:${entry.decision}`).sort()).toEqual([
       'boom:denied',
       'echo:allowed',
@@ -394,7 +411,7 @@ describe('Caller identities (FR-A1/A3)', () => {
 
     await callToolWithMeta(raw, 12, 'boom', {}, { authorization: 'Bearer sk-agent-a' });
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 1);
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({
       tool: 'boom',
@@ -437,7 +454,7 @@ describe('Caller identities (FR-A1/A3)', () => {
 
     expect(failureCount(dir)).toBe(0);
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 1);
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({
       decision: 'denied',
@@ -465,6 +482,7 @@ describe('Caller identities (FR-A1/A3)', () => {
     expect(echoed.meta.authorization).toBeUndefined();
     expect(echoed.meta.keep).toBe('yes');
     expect(JSON.stringify(echoed.meta.mcprelay)).toContain('correlation_id');
+    await callLogsWhen(raw, 1);
     expect(raw.stderr()).not.toContain('sk-agent-a');
 
     const events = callEvents(dir);
@@ -477,7 +495,7 @@ describe('Caller identities (FR-A1/A3)', () => {
     await handshake(raw);
     await callTool(raw, 18, 'echo', { value: 1 });
 
-    const logs = callLogs(raw);
+    const logs = await callLogsWhen(raw, 1);
     expect(logs[0]?.caller).toEqual({ type: 'stdio', identity: 'ci-bot' });
     const events = callEvents(dir);
     expect(events[0]?.caller_identity).toBe('ci-bot');

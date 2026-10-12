@@ -129,6 +129,19 @@ interface LogEntry {
   error?: { message: string; code?: number };
 }
 
+/**
+ * Log lines arrive on stderr, a separate pipe from responses, so a response
+ * can be observed before its log line. Wait for `count` lines; on timeout
+ * return what arrived so the assertion reports the real diff.
+ */
+async function callLogsWhen(raw: RawSession, count: number, timeoutMs = 5000): Promise<LogEntry[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (callLogs(raw).length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return callLogs(raw);
+}
+
 function callLogs(raw: RawSession): LogEntry[] {
   return raw
     .stderr()
@@ -318,6 +331,7 @@ describe('http-transport — wrapping and fidelity', () => {
 
     const headers = stats.lastHeaders as Record<string, string>;
     expect(headers['x-test-header']).toBe('configured-value');
+    await callLogsWhen(raw, 1);
     expect(raw.stderr()).not.toContain('client-token');
   });
 });
@@ -339,7 +353,8 @@ describe('http-transport — D4 classification', () => {
 
     const failed = await callTool(raw, 10, 'echo', { value: 1 });
     expect(failed.error).toBeTypeOf('object');
-    expect(callLogs(raw).at(-1)?.attempt).toBe(2);
+    const logs = await callLogsWhen(raw, 1);
+    expect(logs.at(-1)?.attempt).toBe(2);
 
     const record = (await queueOf(dir).list())[0] as FailureRecord;
     expect(record.failure.class).toBe('transport');
@@ -359,7 +374,8 @@ describe('http-transport — D4 classification', () => {
 
     const failed = await callTool(raw, 10, 'http-error');
     expect(failed.error).toBeTypeOf('object');
-    expect(callLogs(raw).at(-1)?.attempt).toBe(1);
+    const logs = await callLogsWhen(raw, 1);
+    expect(logs.at(-1)?.attempt).toBe(1);
 
     const record = (await queueOf(dir).list())[0] as FailureRecord;
     expect(record.failure.attempts).toBe(1);
@@ -378,7 +394,8 @@ describe('http-transport — D4 classification', () => {
     await handshake(raw);
 
     await callTool(raw, 10, 'http-error');
-    expect(callLogs(raw).at(-1)?.attempt).toBe(2);
+    const logs = await callLogsWhen(raw, 1);
+    expect(logs.at(-1)?.attempt).toBe(2);
   });
 
   it('gates timeout retries on idempotent over HTTP', async () => {
@@ -394,7 +411,8 @@ describe('http-transport — D4 classification', () => {
     );
     await handshake(nonIdempotent);
     await callTool(nonIdempotent, 10, 'sleep', { ms: 300 });
-    expect(callLogs(nonIdempotent).at(-1)?.attempt).toBe(1);
+    const nonIdempotentLogs = await callLogsWhen(nonIdempotent, 1);
+    expect(nonIdempotentLogs.at(-1)?.attempt).toBe(1);
 
     const idempotentDir = workdir();
     const idempotent = proxy(
@@ -406,7 +424,8 @@ describe('http-transport — D4 classification', () => {
     );
     await handshake(idempotent);
     await callTool(idempotent, 10, 'sleep', { ms: 300 });
-    expect(callLogs(idempotent).at(-1)?.attempt).toBe(2);
+    const idempotentLogs = await callLogsWhen(idempotent, 1);
+    expect(idempotentLogs.at(-1)?.attempt).toBe(2);
   });
 });
 

@@ -82,6 +82,19 @@ interface LogEntry {
   attempt: number;
 }
 
+/**
+ * Log lines arrive on stderr, a separate pipe from responses, so a response
+ * can be observed before its log line. Wait for `count` lines; on timeout
+ * return what arrived so the assertion reports the real diff.
+ */
+async function callLogsWhen(raw: RawSession, count: number, timeoutMs = 5000): Promise<LogEntry[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (callLogs(raw).length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return callLogs(raw);
+}
+
 function callLogs(raw: RawSession): LogEntry[] {
   return raw
     .stderr()
@@ -117,7 +130,8 @@ describe('DLQ capture', () => {
     expect(record.server.name).toBe('echo-server');
     expect(record.server.command).toContain('echo-server');
     expect(record.caller).toEqual({ type: 'stdio', identity: 'local' });
-    expect(callLogs(raw).at(-1)?.correlation_id).toBe(record.correlation_id);
+    const logs = await callLogsWhen(raw, 1);
+    expect(logs.at(-1)?.correlation_id).toBe(record.correlation_id);
   });
 
   it('redacts arguments and hashes the raw ones', async () => {
