@@ -58,5 +58,7 @@ Scenario → test traceability: identity-resolution scenarios → `tests/identit
   - 2026-10-08 hermetic: typecheck/lint/format/build/build:examples clean; **380 passed + 5 skipped**; `spec:validate` 13/13
 - [x] 6.2 Real-server evidence: a filesystem/echo session with `identity.profile` (a `caller` policy rule applying), a keyed call mapped to another identity, and an unknown key rejected (`-32003`, denied, no upstream call); then `mcprelay report` grouped per identity — record the output here
   - 2026-10-08 evidence run (real filesystem server): profile `reviewer-bot` call allowed; `write_file` denied by the `caller: reviewer-bot` rule (`-32001`, file never created); keyed call (`Bearer sk-agent-a`) allowed as `agent-a`; unknown key rejected (`-32003`); credential absent from stderr; logs by caller `agent-a:read_file:allowed`, `reviewer-bot:read_file:allowed`, `reviewer-bot:write_file:denied`, `unauthenticated:read_file:denied` → `report` totals `{calls:4, allowed:2, denied:2}` with 4 per-identity rows → **metrics match logs: true**
-- [ ] 6.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
-- [ ] 6.4 Human approval to archive (rule 0); archive the change after approval
+- [x] 6.3 Human approval for the commit/push — state the exact staged scope and message and wait (rule 0)
+  - Approved 2026-10-08: `a9703e4` feat (+ `62cf782` spec) pushed to `origin/main`
+- [x] 6.4 Human approval to archive (rule 0); archive the change after approval
+  - Approved and archived 2026-10-12 as `2026-10-12-auth-identities`
