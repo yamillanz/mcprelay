@@ -16,9 +16,13 @@ import {
 } from '@modelcontextprotocol/server';
 import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 
-import { resolveIdentity, stripCredentialFields } from '../identity/identity.js';
+import {
+  resolveIdentity,
+  stripCredentialFields,
+  type IdentityResolution,
+} from '../identity/identity.js';
 import type { CallLogEntry, CallLogger } from '../observability/call-log.js';
-import { resolveToolPolicy, type McprelayConfig } from '../config/config.js';
+import { resolveToolPolicy, type McprelayConfig, type ToolPolicy } from '../config/config.js';
 import { evaluateCall, type PolicyDecision } from '../policy/policy.js';
 import { hashArguments, redactMessage, redactValue } from '../redaction/redact.js';
 import {
@@ -30,7 +34,7 @@ import { createPersistence, type Persistence } from '../queue/providers.js';
 import { quoteCommandLine } from '../replay/command-line.js';
 import { classifyAttempt, type AttemptOutcome, type FailurePhase } from '../pipeline/classify.js';
 import { extractIdempotencyKey } from '../pipeline/idempotency.js';
-import { runWithRetry } from '../pipeline/retry.js';
+import { runWithRetry, type RetryResult } from '../pipeline/retry.js';
 import { createSessionContext, recordToolInventory, type SessionContext } from './session.js';
 import {
   ClientTransport,
@@ -500,173 +504,241 @@ async function logCall(deps: InterceptionDeps, entry: CallLogEntry): Promise<voi
   }
 }
 
-async function interceptToolCall(
+type LogBase = Omit<CallLogFields, 'decision' | 'responseBytes' | 'attempt' | 'error' | 'enforced'>;
+
+/** Per-call facts resolved once; the handler owns the control flow over them. */
+interface CallContext {
+  tool: string;
+  rawArguments: unknown;
+  idempotencyKey: string | undefined;
+  policy: ToolPolicy;
+  metadata: CallMetadata;
+  requestBytes: number;
+  startedAt: number;
+  caller: CallLogEntry['caller'];
+}
+
+/** Resolves the per-call context (identity included); the gates stay in the handler. */
+function prepareCallContext(
   deps: InterceptionDeps,
   request: { params: { name: string } & Record<string, unknown> },
-  signal: AbortSignal | undefined,
-): Promise<CallToolResult> {
+): { context: CallContext; resolution: IdentityResolution } {
   const startedAt = Date.now();
   const tool = request.params.name;
   const rawArguments = request.params.arguments;
-  const idempotencyKey = extractIdempotencyKey({
-    _meta: (request.params as { _meta?: unknown })._meta,
-    arguments: rawArguments,
-  });
-  const policy = resolveToolPolicy(deps.config, tool);
-  const { correlationId, progressToken, params, trace } = prepareCallMetadata(request.params);
-  const requestBytes = byteLength(params);
-
-  // Identity resolves before policy: a rejected credential never reaches the
-  // retry pipeline, the upstream, or the DLQ (FR-A1/FR-A3, ADR-0010).
+  const metadata = prepareCallMetadata(request.params);
   const resolution = resolveIdentity(deps.config.identity, request.params._meta);
-  if (!resolution.ok) {
-    const message = `authentication failed: ${resolution.reason}`;
-    await logCall(
-      deps,
-      buildCallLogEntry({
-        correlationId,
-        trace,
-        caller: UNAUTHENTICATED,
-        tool,
-        serverName: deps.session.server.name,
-        startedAt,
-        decision: 'denied',
-        requestBytes,
-        responseBytes: 0,
-        attempt: 0,
-        error: { message },
-      }),
-    );
-    await recordAuthDenial(deps, { tool, correlationId, reason: resolution.reason });
-    throw new ProtocolError(AUTH_DENIED_CODE, message);
-  }
-
-  const caller: CallLogEntry['caller'] = { type: 'stdio', identity: resolution.identity };
-  const logBase = {
-    correlationId,
-    trace,
-    caller,
+  const context: CallContext = {
     tool,
-    serverName: deps.session.server.name,
+    rawArguments,
+    idempotencyKey: extractIdempotencyKey({ _meta: request.params._meta, arguments: rawArguments }),
+    policy: resolveToolPolicy(deps.config, tool),
+    metadata,
+    requestBytes: byteLength(metadata.params),
     startedAt,
-    requestBytes,
+    caller: resolution.ok ? { type: 'stdio', identity: resolution.identity } : UNAUTHENTICATED,
   };
+  return { context, resolution };
+}
 
-  // Policy runs before the retry pipeline: a denial consumes no retries,
-  // claims no DLQ record, and never reaches the upstream (FR-Y4).
-  const decision = evaluateCall(deps.config.policy, {
-    tool,
-    arguments: rawArguments,
-    caller: resolution.identity,
+/** Derives the shared log-entry fields from the context once per call. */
+function logFields(deps: InterceptionDeps, context: CallContext): LogBase {
+  return {
+    correlationId: context.metadata.correlationId,
+    trace: context.metadata.trace,
+    caller: context.caller,
+    tool: context.tool,
+    serverName: deps.session.server.name,
+    startedAt: context.startedAt,
+    requestBytes: context.requestBytes,
+  };
+}
+
+/** The credential-rejection message; one template for the log entry and the throw. */
+function authFailureMessage(reason: string): string {
+  return `authentication failed: ${reason}`;
+}
+
+/** Logs + audits the credential rejection; the handler throws right after. */
+async function denyCredential(
+  deps: InterceptionDeps,
+  context: CallContext,
+  reason: string,
+): Promise<void> {
+  await logCall(
+    deps,
+    buildCallLogEntry({
+      ...logFields(deps, context),
+      decision: 'denied',
+      responseBytes: 0,
+      attempt: 0,
+      error: { message: authFailureMessage(reason) },
+    }),
+  );
+  await recordAuthDenial(deps, {
+    tool: context.tool,
+    correlationId: context.metadata.correlationId,
+    reason,
   });
-  if (decision.action === 'deny') {
-    const message = `policy denied tool '${tool}': ${decision.reason}`;
-    if (deps.config.policyDryRun) {
-      deps.stderr(`mcprelay: policy dry-run: would deny tool '${tool}' (${decision.reason})\n`);
-      await logCall(
-        deps,
-        buildCallLogEntry({
-          ...logBase,
-          decision: 'denied',
-          responseBytes: 0,
-          attempt: 0,
-          error: { message },
-          enforced: false,
-        }),
-      );
-    } else {
-      await logCall(
-        deps,
-        buildCallLogEntry({
-          ...logBase,
-          decision: 'denied',
-          responseBytes: 0,
-          attempt: 0,
-          error: { message },
-        }),
-      );
-      await recordDenial(deps, { tool, correlationId, decision });
-      throw new ProtocolError(POLICY_DENIED_CODE, message);
-    }
+}
+
+/** The enforced-deny message; one template for the log entries, audit, and the throw. */
+function policyDeniedMessage(tool: string, reason: string): string {
+  return `policy denied tool '${tool}': ${reason}`;
+}
+
+/** Dry-run denial: records the decision without enforcing; the call proceeds. */
+async function logPolicyWouldDeny(
+  deps: InterceptionDeps,
+  base: LogBase,
+  decision: PolicyDecision,
+): Promise<void> {
+  deps.stderr(`mcprelay: policy dry-run: would deny tool '${base.tool}' (${decision.reason})\n`);
+  await logCall(
+    deps,
+    buildCallLogEntry({
+      ...base,
+      decision: 'denied',
+      responseBytes: 0,
+      attempt: 0,
+      error: { message: policyDeniedMessage(base.tool, decision.reason) },
+      enforced: false,
+    }),
+  );
+}
+
+/** Enforced-denial persistence: log + audit; the handler throws right after. */
+async function denyByPolicy(
+  deps: InterceptionDeps,
+  base: LogBase,
+  decision: PolicyDecision,
+): Promise<void> {
+  await logCall(
+    deps,
+    buildCallLogEntry({
+      ...base,
+      decision: 'denied',
+      responseBytes: 0,
+      attempt: 0,
+      error: { message: policyDeniedMessage(base.tool, decision.reason) },
+    }),
+  );
+  await recordDenial(deps, { tool: base.tool, correlationId: base.correlationId, decision });
+}
+
+/** One upstream attempt: the connected guard, then the relay with phase classification. */
+async function attemptToolCall(
+  deps: InterceptionDeps,
+  context: CallContext,
+  signal: AbortSignal | undefined,
+): Promise<AttemptOutcome> {
+  if (!deps.link.connected) {
+    return {
+      kind: 'error',
+      error: new Error('upstream transport is not connected'),
+      phase: 'pre_send',
+    };
   }
+  return relayToolCall(deps, context, signal);
+}
 
-  const result = await runWithRetry({
-    attempt: async (): Promise<AttemptOutcome> => {
-      if (!deps.link.connected) {
-        return {
-          kind: 'error',
-          error: new Error('upstream transport is not connected'),
-          phase: 'pre_send',
-        };
-      }
-      try {
-        const value = await deps.relayRequest('tools/call', params, progressToken, {
-          timeoutMs: policy.timeoutMs,
-          ...(signal === undefined ? {} : { signal }),
-        });
-        return { kind: 'result', result: value };
-      } catch (error) {
-        return { kind: 'error', error, phase: failurePhase(error, signal, deps.link.kind) };
-      }
-    },
-    classify: (outcome) => classifyAttempt(outcome, { idempotent: policy.idempotent }),
-    policy: {
-      maxAttempts: policy.retry.maxAttempts,
-      baseMs: policy.retry.baseMs,
-      jitter: policy.retry.jitter,
-    },
-  });
+/** The relay itself; how it failed decides the retry phase (D4, FR-R2). */
+async function relayToolCall(
+  deps: InterceptionDeps,
+  context: CallContext,
+  signal: AbortSignal | undefined,
+): Promise<AttemptOutcome> {
+  try {
+    const value = await deps.relayRequest(
+      'tools/call',
+      context.metadata.params,
+      context.metadata.progressToken,
+      {
+        timeoutMs: context.policy.timeoutMs,
+        ...(signal === undefined ? {} : { signal }),
+      },
+    );
+    return { kind: 'result', result: value };
+  } catch (error) {
+    return { kind: 'error', error, phase: failurePhase(error, signal, deps.link.kind) };
+  }
+}
 
-  if (result.outcome.kind === 'result') {
-    const value = result.outcome.result;
-    const isError = result.classification.class === 'tool_error';
-    if (isError && policy.captureToolErrors) {
+/** Records the idempotent execution; an index failure never breaks the call. */
+async function recordIdempotentExecution(
+  deps: InterceptionDeps,
+  context: CallContext,
+  key: string,
+): Promise<void> {
+  try {
+    await deps.persistence.getQueue().recordExecution({
+      key,
+      toolName: context.tool,
+      argumentsHash: hashArguments(context.rawArguments),
+      executedAt: new Date().toISOString(),
+      source: 'live',
+    });
+  } catch (error) {
+    deps.stderr(
+      `mcprelay: idempotency index write failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
+/** Result path: capture on configured tool errors, idempotency record, final log. */
+async function finalizeSuccessfulCall(
+  deps: InterceptionDeps,
+  context: CallContext,
+  result: RetryResult,
+): Promise<CallToolResult> {
+  const outcome = result.outcome as { kind: 'result'; result: unknown };
+  const value = outcome.result;
+  const isError = result.classification.class === 'tool_error';
+  if (isError) {
+    if (context.policy.captureToolErrors) {
       await captureFailure(deps, {
-        tool,
-        correlationId,
-        caller,
-        rawArguments,
+        tool: context.tool,
+        correlationId: context.metadata.correlationId,
+        caller: context.caller,
+        rawArguments: context.rawArguments,
         failureClass: 'tool_error',
         message: 'isError result',
         attempts: result.attempts,
       });
     }
-    if (!isError && idempotencyKey !== undefined) {
-      try {
-        await deps.persistence.getQueue().recordExecution({
-          key: idempotencyKey,
-          toolName: tool,
-          argumentsHash: hashArguments(rawArguments),
-          executedAt: new Date().toISOString(),
-          source: 'live',
-        });
-      } catch (error) {
-        deps.stderr(
-          `mcprelay: idempotency index write failed: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
-      }
-    }
-    await logCall(
-      deps,
-      buildCallLogEntry({
-        ...logBase,
-        decision: isError ? 'failed' : 'allowed',
-        responseBytes: byteLength(value),
-        attempt: result.attempts,
-        ...(isError ? { error: { message: 'isError result' } } : {}),
-      }),
-    );
-    return value as CallToolResult;
+  } else if (context.idempotencyKey !== undefined) {
+    await recordIdempotentExecution(deps, context, context.idempotencyKey);
   }
+  await logCall(
+    deps,
+    buildCallLogEntry({
+      ...logFields(deps, context),
+      decision: isError ? 'failed' : 'allowed',
+      responseBytes: byteLength(value),
+      attempt: result.attempts,
+      ...(isError ? { error: { message: 'isError result' } } : {}),
+    }),
+  );
+  return value as CallToolResult;
+}
 
-  const error = result.outcome.error;
+/**
+ * Error path and terminal step: cancelled logs and rethrows; recordable
+ * failures are captured, then logged and rethrown. Always throws.
+ */
+async function failToolCall(
+  deps: InterceptionDeps,
+  context: CallContext,
+  result: RetryResult,
+): Promise<never> {
+  const outcome = result.outcome as { kind: 'error'; error: unknown; phase: string };
+  const error = outcome.error;
   const message = error instanceof Error ? error.message : String(error);
-
   if (result.classification.class === 'cancelled') {
     await logCall(
       deps,
       buildCallLogEntry({
-        ...logBase,
+        ...logFields(deps, context),
         decision: 'cancelled',
         responseBytes: 0,
         attempt: result.attempts,
@@ -674,25 +746,23 @@ async function interceptToolCall(
     );
     throw error;
   }
-
   const recordClass = failureClassFromD4(result.classification.class);
   if (recordClass !== undefined) {
     await captureFailure(deps, {
-      tool,
-      correlationId,
-      caller,
-      rawArguments,
+      tool: context.tool,
+      correlationId: context.metadata.correlationId,
+      caller: context.caller,
+      rawArguments: context.rawArguments,
       failureClass: recordClass,
       message,
       attempts: result.attempts,
     });
   }
-
   const code = (error as { code?: number }).code;
   await logCall(
     deps,
     buildCallLogEntry({
-      ...logBase,
+      ...logFields(deps, context),
       decision: 'failed',
       responseBytes: 0,
       attempt: result.attempts,
@@ -700,6 +770,56 @@ async function interceptToolCall(
     }),
   );
   throw error;
+}
+
+async function interceptToolCall(
+  deps: InterceptionDeps,
+  request: { params: { name: string } & Record<string, unknown> },
+  signal: AbortSignal | undefined,
+): Promise<CallToolResult> {
+  // Identity resolves before policy: a rejected credential never reaches the
+  // retry pipeline, the upstream, or the DLQ (FR-A1/FR-A3, ADR-0010).
+  const { context, resolution } = prepareCallContext(deps, request);
+  if (!resolution.ok) {
+    await denyCredential(deps, context, resolution.reason);
+    throw new ProtocolError(AUTH_DENIED_CODE, authFailureMessage(resolution.reason));
+  }
+
+  const logBase = logFields(deps, context);
+
+  // Policy runs before the retry pipeline: a denial consumes no retries,
+  // claims no DLQ record, and never reaches the upstream (FR-Y4).
+  const decision = evaluateCall(deps.config.policy, {
+    tool: context.tool,
+    arguments: context.rawArguments,
+    caller: resolution.identity,
+  });
+  if (decision.action === 'deny') {
+    if (deps.config.policyDryRun) {
+      await logPolicyWouldDeny(deps, logBase, decision);
+    } else {
+      await denyByPolicy(deps, logBase, decision);
+      throw new ProtocolError(
+        POLICY_DENIED_CODE,
+        policyDeniedMessage(context.tool, decision.reason),
+      );
+    }
+  }
+
+  const result = await runWithRetry({
+    attempt: () => attemptToolCall(deps, context, signal),
+    classify: (outcome) => classifyAttempt(outcome, { idempotent: context.policy.idempotent }),
+    policy: {
+      maxAttempts: context.policy.retry.maxAttempts,
+      baseMs: context.policy.retry.baseMs,
+      jitter: context.policy.retry.jitter,
+    },
+  });
+
+  if (result.outcome.kind === 'result') {
+    return finalizeSuccessfulCall(deps, context, result);
+  }
+  return failToolCall(deps, context, result);
 }
 
 async function relayPassthroughRequest(

@@ -36,5 +36,5 @@ Across milestones the handler absorbed four concerns inline: the M9 auth-denial 
 
 ## Follow-ups (out of scope, recorded)
 
-- `src/proxy/bridge.ts` measures 835 lines (>400 file gate) — a same-file-helpers split into a second bridge module needs its own decision and change.
+- `src/proxy/bridge.ts` measures 835 lines pre-refactor (>400 file gate) — 955 after, since extraction nets +120 in-file while resolving the three function BLOCKERs — a same-file-helpers split into a second bridge module needs its own decision and change (craft-reviewer 2026-10-11: "must not be deferred indefinitely").
 - The NFR-3 arbiter does not exist yet: `bench/` (middleware-only p95 ≤ 5 ms) needs its own change. Recorded 2026-10-11 with measured context — extraction boundary cost ~184 ns/call (microbench, best of 5 × 200k iterations) vs p50 0.34 ms / p95 1.03 ms per real intercepted call on the current build.

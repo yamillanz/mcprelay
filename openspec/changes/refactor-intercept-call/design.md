@@ -28,7 +28,7 @@ The handler keeps every `throw` and the dry-run continue adjacent to its gate co
 
 ### D2 — One context object replaces the `logBase` clump (Parameter Object — trigger: the same field set rebuilt at 6 sites)
 
-`CallContext` = `{ tool, rawArguments, idempotencyKey, policy, metadata (correlationId, progressToken, params, trace), requestBytes, startedAt, caller }`, built by `prepareCallContext(deps, request)`; `logFields(deps, context)` derives the existing `CallLogFields` once per call, replacing the inline `logBase` literal and its five spreads. Per-call allocations are unchanged.
+`CallContext` = `{ tool, rawArguments, idempotencyKey, policy, metadata (correlationId, progressToken, params, trace), requestBytes, startedAt, caller }`, built by `prepareCallContext(deps, request)` together with the identity `resolution`; `logFields(deps, context)` derives the existing `CallLogFields` base once per call, replacing the inline `logBase` literal and its five spreads. Per-call allocations trade the loose consts for exactly two short-lived struct literals (the context + its `{ context, resolution }` wrapper); the AC-relevant counts are unchanged: I/O calls, serialization, log/audit/capture/idempotency write counts, and the attempt closure at exactly 1/call.
 
 ### D3 — Gates
 
@@ -41,7 +41,7 @@ The handler keeps every `throw` and the dry-run continue adjacent to its gate co
 
 ### D5 — Outcome tail
 
-`result.outcome.kind === 'result'` → `finalizeSuccessfulCall(deps, context, result): Promise<CallToolResult>` (tool-error capture when configured; `recordIdempotentExecution` when a key exists — the nested `try/catch` lives in that helper at depth ≤ 2; log `allowed`/`failed`; return value). Otherwise `failToolCall(deps, context, result): Promise<never>` — cancelled logs + throws; other outcomes capture per D4 when recordable, log `failed`, throw. The handler returns the ternary `return kind === 'result' ? finalizeSuccessfulCall(…) : failToolCall(…)` so there is no unreachable tail.
+`result.outcome.kind === 'result'` → `finalizeSuccessfulCall(deps, context, result): Promise<CallToolResult>` (tool-error capture when configured; `recordIdempotentExecution` when a key exists — the nested `try/catch` lives in that helper at depth ≤ 2; log `allowed`/`failed`; return value). Otherwise `failToolCall(deps, context, result): Promise<never>` — cancelled logs + throws; other outcomes capture per D4 when recordable, log `failed`, throw. The handler returns through if/else delegation (`if (kind === 'result') return finalizeSuccessfulCall(…); return failToolCall(…);`) so there is no unreachable tail; each helper narrows `result.outcome` with a documented cast (the dispatch guarantee lives at the single handler call site).
 
 ## Testing / Verification Strategy
 
