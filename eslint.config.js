@@ -15,12 +15,14 @@ export default [
     },
   },
   {
-    files: ['examples/**/*.mjs'],
+    files: ['examples/**/*.mjs', 'scripts/**/*.mjs'],
     languageOptions: {
       globals: {
+        console: 'readonly',
         process: 'readonly',
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
+        URL: 'readonly',
       },
     },
   },

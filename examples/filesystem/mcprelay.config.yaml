@@ -1,0 +1,18 @@
+# mcprelay config for the official filesystem server — see README.md.
+# Defaults already work (SQLite queue/store under ./.mcprelay/, retries on,
+# redaction on); this file makes the guardrail explicit.
+
+policy:
+  default: allow
+  rules:
+    # Agents may read repository metadata, but never corrupt it.
+    - tool: write_file
+      args:
+        path:
+          regex: '(^|/)\.git(/|$)'
+      action: deny
+    - tool: edit_file
+      args:
+        path:
+          regex: '(^|/)\.git(/|$)'
+      action: deny

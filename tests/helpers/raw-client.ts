@@ -26,11 +26,12 @@ interface Pending {
 export function startRaw(
   command: string,
   args: readonly string[],
-  options: { env?: NodeJS.ProcessEnv } = {},
+  options: { env?: NodeJS.ProcessEnv; cwd?: string } = {},
 ): RawSession {
   const child = spawn(command, [...args], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: options.env ?? process.env,
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
   }) as ChildProcessWithoutNullStreams;
 
   const lines: string[] = [];

@@ -1,6 +1,6 @@
 {
   "name": "@yamillanz/mcprelay",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "The reliability layer for MCP tool calls — local-first policy, observability, and a dead-letter queue with replay for any stdio MCP server.",
   "keywords": [
     "mcp",
@@ -40,6 +40,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "build:examples": "tsc -p tsconfig.examples.json",
+    "demo": "node scripts/demo.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build && npm run build:examples",
     "test": "vitest run",

@@ -1,0 +1,11 @@
+# mcprelay config for the official memory server — see README.md.
+# The knowledge graph is local: the server persists memory.json in the
+# working directory it is started from.
+
+policy:
+  default: allow
+  rules:
+    # An agent may build and extend the graph, but deleting entities is a
+    # human decision — deny it outright (the simplest rule kind: tool only).
+    - tool: delete_entities
+      action: deny

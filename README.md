@@ -2,9 +2,11 @@
 
 **The reliability layer for MCP tool calls.** Middleware that wraps any stdio MCP server and adds policy, observability, and a dead-letter queue with replay around `tools/call`.
 
-> **Status: M9 — identities.** Wrap any stdio server **or a remote Streamable HTTP server** with the same pipeline: per-call timeouts and classified retries, declarative allow/deny policy (with dry-run), a durable, redacted dead-letter queue, **replay as redrive for side effects** (including **batch replay**), an idempotency guard against duplicates, a **RabbitMQ-backed DLQ** beside the zero-infra SQLite default, **per-tool latency/error/caller metrics** persisted on every call and rendered by `mcprelay report`, and **caller identities** (config profile, static API keys, `--identity`) that feed policy and the report — with client credentials validated at the edge and never forwarded upstream. See [`docs/PRD.md`](docs/PRD.md) §12 for what lands next.
+> **Status: v1.0 — the first stable release.** Wrap any stdio server **or a remote Streamable HTTP server** with the same pipeline: per-call timeouts and classified retries, declarative allow/deny policy (with dry-run), a durable, redacted dead-letter queue, **replay as redrive for side effects** (including **batch replay**), an idempotency guard against duplicates, a **RabbitMQ-backed DLQ** beside the zero-infra SQLite default, **per-tool latency/error/caller metrics** persisted on every call and rendered by `mcprelay report`, and **caller identities** (config profile, static API keys, `--identity`) that feed policy and the report — with client credentials validated at the edge and never forwarded upstream. See [`docs/PRD.md`](docs/PRD.md) for the architecture and scope; post-v1 items (`bench/`, FR-A2 JWT/mTLS, more adapters) are tracked as follow-ups.
 >
 > Published on npm as [`@yamillanz/mcprelay`](https://www.npmjs.com/package/@yamillanz/mcprelay) (the bare `mcprelay` name is blocked by npm's name-similarity policy; scoped fallback per PRD §11 — the installed command is still `mcprelay`).
+
+![mcprelay — the 60-second demo: a call fails, lands in the dead-letter queue, and the replay writes the file](https://raw.githubusercontent.com/yamillanz/mcprelay/main/docs/assets/demo.gif)
 
 ## Quickstart (client config)
 
@@ -117,6 +119,33 @@ Because secrets are never stored in the clear, replay refuses to run a record wh
 ```sh
 mcprelay replay run <id> --set api_key=…      # then the call runs with the real value
 ```
+
+## How it compares
+
+The MCP gateway space is crowded; the operational failure path is not. Scan date **2026-10-12** (star counts verified that day; links per row):
+
+| Project                                                                      | Stack        | What it does                                        | Gap we exploit                                                            |
+| ---------------------------------------------------------------------------- | ------------ | --------------------------------------------------- | ------------------------------------------------------------------------- |
+| [`microsoft/mcp-gateway`](https://github.com/microsoft/mcp-gateway) (874★)   | .NET/TS, K8s | Enterprise reverse proxy, control plane, portal     | K8s/enterprise orchestration; not local-first; no DLQ/replay              |
+| [`P4ST4S/mcp-audit`](https://github.com/P4ST4S/mcp-audit) (8★)               | Go           | Audit proxy: signed logs, redaction, allow/deny     | Audit-first; explicitly avoids retrying `tools/call`; no DLQ/replay       |
+| [`rsh1k/mcp-gate`](https://github.com/rsh1k/mcp-gate) (3★)                   | Python       | Policy firewall, hash-chained audit                 | Security-first; no failure-capture/replay workflow                        |
+| [`mcpgatehq/gateward`](https://github.com/mcpgatehq/gateward) (0★)           | Python       | Built-in security rules, stdio only                 | Fixed rules; no reliability layer                                         |
+| [`kgeg401/mcp-guard`](https://github.com/kgeg401/mcp-guard) (0★)             | Go           | Policy, redaction, signed audit, `replay --id`      | Replay is audit-integrity oriented; no retry pipeline, no pluggable queue |
+| [`JinBeiCN/mcp-gateway`](https://github.com/JinBeiCN/mcp-gateway) (0★)       | Go           | Auth, RBAC, rate limits, prompt-injection detection | Security-first; no DLQ                                                    |
+| [`yogesh895/gate-mcp`](https://github.com/yogesh895/gate-mcp) (0★)           | Node         | Control plane + admin UI, multi-tenant              | Heavy enterprise scope; no DLQ/replay                                     |
+| [`bentabol/mcp-retry`](https://github.com/bentabol/mcp-retry) (0★)           | Python       | Retry, idempotency dedup, circuit breaker           | Resilience only (no policy/audit/DLQ); not TypeScript                     |
+| [`CK-Rajput/mcp-resilient`](https://github.com/CK-Rajput/mcp-resilient) (0★) | Python       | Retry/circuit-breaker decorator, fallback chains    | Library-level, client-side; no DLQ store/replay                           |
+
+Commercial gateways (mcpgateway.com, mcptrail.com) cover similar ground as SaaS; "replay" elsewhere in the ecosystem mostly means record/replay for **tests** (nock/msw-style fixtures). The niche that is still empty: _operational_ dead-letter capture + inspection + replay of failed tool calls as the core of a product — TypeScript, local-first, pluggable real-MQ backends.
+
+## Design decisions
+
+The full set lives in [`docs/adr/`](docs/adr/) — every ADR records its rejected alternatives. The four that shape the product most:
+
+- **[ADR-0004 — DLQ persistence](docs/adr/0004-dlq-persistence.md):** `better-sqlite3` (synchronous, WAL) as the zero-infra default; capture completes _before_ the client sees the error; secrets redacted, raw arguments hashed. Rejected: `node:sqlite` (would drop Node 20), `sqlite3`, `sql.js` (no real durability story).
+- **[ADR-0005 — replay semantics](docs/adr/0005-replay-semantics.md):** replay is redrive for side effects — the result lands in the audit trail, and `[REDACTED]` arguments block execution until supplied via `--set`. Rejected: storing raw secrets (violates NFR-4) and silently sending redacted values upstream (executes a different call than the one that failed).
+- **[ADR-0008 — RabbitMQ topology](docs/adr/0008-rabbitmq-adapter.md):** a durable `mcp.dlx`/`mcp.dlq` exchange/queue holds the immutable capture with publisher confirms; the SQLite replay index serves queries. Rejected: peek-via-requeue (O(n) scans, ambiguous claim state, crash-window duplication) and publish-only event streams (no `list`/`get`).
+- **[ADR-0010 — identity resolution](docs/adr/0010-identity-resolution.md):** profile identities for stdio, static API keys mapped to identities via the standard `_meta.authorization` Bearer shape; unrecognized credentials denied at the edge (`-32003`) and stripped from every relay. Rejected: requiring credentials (breaks zero-config), env-var identities, custom credential schemes.
 
 ## Dead-letter queue
 

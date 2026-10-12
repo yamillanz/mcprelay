@@ -1,0 +1,11 @@
+# mcprelay config for the official everything server — see README.md.
+# The everything server is the SDK's test server; its longRunningOperation
+# tool makes it a natural timeout / DLQ / replay playground.
+
+reliability:
+  timeout_ms: 5000 # a longRunningOperation(10s) will time out and retry
+  retry:
+    max_attempts: 2
+  per_tool:
+    longRunningOperation:
+      idempotent: true # safe to retry: the demo tool has no side effects
